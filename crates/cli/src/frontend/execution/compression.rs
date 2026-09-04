@@ -162,7 +162,8 @@ fn render_compress_choice_error(err: CompressionAlgorithmParseError, trimmed: &s
     } else {
         trimmed
     };
-    #[allow(unused_mut)] // REASON: mutated when lz4 or zstd features are enabled
+    #[allow(clippy::useless_vec, unused_mut)]
+    // REASON: mutated when lz4 or zstd features are enabled
     let mut supported = vec!["zlib", "zlibx"];
     #[cfg(feature = "lz4")]
     {
