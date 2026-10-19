@@ -11,7 +11,7 @@ publish = true
 autobins = false
 
 [[bin]]
-name = "oc-rsync"
+name = "rsync"
 path = "src/bin/oc-rsync.rs"
 
 [features]
