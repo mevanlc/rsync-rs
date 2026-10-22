@@ -437,6 +437,10 @@ struct RecordedUpdate {
 
 impl ClientProgressObserver for RecordingObserver {
     fn on_progress(&mut self, update: &ClientProgressUpdate) {
+        // A finished directory's progress2 redraw names no file.
+        if update.is_list_done() {
+            return;
+        }
         self.updates.push(RecordedUpdate {
             path: update.event().relative_path().to_path_buf(),
             kind: update.event().kind().clone(),
@@ -933,4 +937,81 @@ fn live_progress_without_session_leaves_header_and_listing_to_summary() {
     live.finish().expect("finish succeeds");
     assert!(buffer.is_empty(), "{:?}", String::from_utf8_lossy(&buffer));
     assert!(!rendered.header && !rendered.listing, "{rendered:?}");
+}
+
+/// A re-run's progress2 line on a terminal: upstream redraws it in place at
+/// each finished sub-list (sender.c:533-537), so it keeps moving while
+/// up-to-date files are checked, and nothing those files print at the default
+/// verbosity may end the line. The whole run is one line of `\r` redraws.
+#[test]
+fn progress2_rerun_redraws_one_terminal_line_per_finished_directory() {
+    use crate::frontend::escape::EscapeStyle;
+    use crate::frontend::progress::{
+        FlistBanner, LiveListing, LocalSessionOutput, NameOutputLevel, ProgressOutputConfig,
+    };
+
+    let (tmp, source_dir) = setup_multiple_files(&[
+        ("a/one.txt", 3),
+        ("a/two.txt", 3),
+        ("b/one.txt", 3),
+        ("b/two.txt", 3),
+        ("c/one.txt", 3),
+        ("c/two.txt", 3),
+    ]);
+    let dest_dir = tmp.path().join("dest");
+    let config = || {
+        let mut source_arg = source_dir.as_os_str().to_os_string();
+        source_arg.push(std::path::MAIN_SEPARATOR.to_string());
+        ClientConfig::builder()
+            .transfer_args([source_arg, dest_dir.clone().into_os_string()])
+            .recursive(true)
+            .times(true)
+            .progress(true)
+            .build()
+    };
+    core::client::run_client(config()).expect("first copy");
+    std::fs::write(source_dir.join("b").join("one.txt"), b"changed").expect("change b/one");
+
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut live = LiveProgress::with_output_config(
+        &mut buffer,
+        ProgressMode::Overall,
+        HumanReadableMode::Grouped,
+        ProgressOutputConfig {
+            is_terminal: true,
+            outbuf_mode: None,
+        },
+    )
+    .with_local_session(LocalSessionOutput {
+        banner: FlistBanner::None,
+        delta_notice: None,
+        itemizing: false,
+        escape: EscapeStyle::terminal(false),
+        listing: Some(LiveListing::Names {
+            verbosity: 0,
+            name_level: NameOutputLevel::Disabled,
+            name_overridden: false,
+        }),
+    });
+    run_client_with_observer(config(), Some(&mut live as &mut dyn ClientProgressObserver))
+        .expect("re-run");
+    live.finish().expect("finish succeeds");
+    let output = String::from_utf8(buffer).expect("output is valid UTF-8");
+
+    assert_eq!(
+        output.matches('\n').count(),
+        1,
+        "one line, ended only at the finish: {output:?}"
+    );
+    // One redraw per finished directory (a, b, c and the root) plus the
+    // changed file's own line.
+    assert!(
+        output.matches('\r').count() >= 5,
+        "redrawn per finished directory: {output:?}"
+    );
+    let last = output.trim_end().rsplit('\r').next().unwrap_or_default();
+    assert!(
+        last.contains("(xfr#1, to-chk=0/"),
+        "the run ends on its completed list: {output:?}"
+    );
 }

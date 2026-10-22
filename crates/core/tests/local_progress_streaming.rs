@@ -40,6 +40,7 @@ struct Tick {
     path: PathBuf,
     is_final: bool,
     transfer_complete: bool,
+    list_done: bool,
     flist_eof: bool,
     total: usize,
     remaining: usize,
@@ -62,8 +63,13 @@ impl OrderObserver {
     /// The final tick of each transferred file, in transfer order.
     fn transfer_ticks(&self) -> Vec<&Tick> {
         self.ticks()
-            .filter(|tick| tick.is_final && !tick.transfer_complete)
+            .filter(|tick| tick.is_final && !tick.transfer_complete && !tick.list_done)
             .collect()
+    }
+
+    /// The line redrawn as each directory's entries are finished.
+    fn list_done_ticks(&self) -> Vec<&Tick> {
+        self.ticks().filter(|tick| tick.list_done).collect()
     }
 }
 
@@ -73,6 +79,7 @@ impl ClientProgressObserver for OrderObserver {
             path: update.event().relative_path().to_path_buf(),
             is_final: update.is_final(),
             transfer_complete: update.is_transfer_complete(),
+            list_done: update.is_list_done(),
             flist_eof: update.flist_eof(),
             total: update.total(),
             remaining: update.remaining(),
@@ -163,6 +170,12 @@ fn tree_past_preview_limit_streams_with_growing_total() {
             "the first transfer sees only the directories read so far, not {}",
             transfers[0].total
         );
+
+        // upstream: sender.c:533-537 - progress2 is redrawn at the NDX_DONE of
+        // each finished sub-list: every directory, and the transfer root.
+        let list_done = observer.list_done_ticks();
+        assert_eq!(list_done.len(), DIRECTORIES + 1);
+        assert!(list_done.iter().all(|tick| !tick.flist_eof));
 
         let mut previous_total = 0;
         for tick in observer.ticks() {

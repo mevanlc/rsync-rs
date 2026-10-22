@@ -244,6 +244,10 @@ struct RecordingObserver {
 
 impl ClientProgressObserver for RecordingObserver {
     fn on_progress(&mut self, update: &ClientProgressUpdate) {
+        // A finished directory's progress2 redraw names no file.
+        if update.is_list_done() {
+            return;
+        }
         self.updates.push((
             update.event().relative_path().to_path_buf(),
             update.event().kind().clone(),

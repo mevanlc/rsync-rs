@@ -235,6 +235,14 @@ pub trait LocalCopyRecordHandler {
     /// directory's sub-list to the file list (flist.c:send_extra_file_list()).
     fn handle_file_list_growth(&mut self, _entries: usize, _bytes: u64) {}
 
+    /// Handles the end of a directory whose entries have all been processed.
+    ///
+    /// Each directory's children are one INC_RECURSE sub-list upstream; once
+    /// the generator is done with one it sends `NDX_DONE`
+    /// (generator.c:2731-2739), and the sender redraws `--info=progress2`
+    /// (sender.c:533-537).
+    fn handle_file_list_done(&mut self) {}
+
     /// Handles a regular file whose data is about to move, carrying the
     /// record its completion is expected to produce.
     ///

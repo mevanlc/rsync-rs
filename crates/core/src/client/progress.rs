@@ -54,6 +54,7 @@ pub struct ClientProgressUpdate {
     overall_elapsed: Duration,
     flist_eof: bool,
     transfer_complete: bool,
+    list_done: bool,
 }
 
 impl ClientProgressUpdate {
@@ -135,6 +136,21 @@ impl ClientProgressUpdate {
     pub const fn is_transfer_complete(&self) -> bool {
         self.transfer_complete
     }
+
+    /// Reports whether this update is the progress2 line for a finished
+    /// INC_RECURSE sub-list (a directory's entries) rather than a per-file
+    /// tick.
+    ///
+    /// Mirrors upstream's `end_progress(0)` when the sender reads `NDX_DONE`
+    /// for a finished sub-list (sender.c:533-537), which redraws the
+    /// `(xfr#N, ir-chk=R/T)` line in place while the generator works through
+    /// up-to-date files. Like [`is_transfer_complete`](Self::is_transfer_complete)
+    /// it fires only under `--info=progress2`; per-file progress mode ignores
+    /// it.
+    #[must_use]
+    pub const fn is_list_done(&self) -> bool {
+        self.list_done
+    }
 }
 
 /// Observer invoked for each progress update generated during client execution.
@@ -192,6 +208,7 @@ impl ClientProgressUpdate {
             overall_elapsed,
             flist_eof,
             transfer_complete: false,
+            list_done: false,
         }
     }
 }
@@ -225,6 +242,7 @@ impl ClientProgressUpdate {
             overall_elapsed,
             flist_eof,
             transfer_complete: false,
+            list_done: false,
         }
     }
 }
@@ -335,6 +353,9 @@ pub(crate) struct ClientProgressForwarder<'a> {
     // picks `to-chk` over `ir-chk`. False while an incremental copy too large
     // to preview streams, its totals growing as the walk reads directories.
     flist_eof: bool,
+    // Whether the copy recurses incrementally, so each finished directory is
+    // a finished sub-list upstream redraws progress2 for (sender.c:533-537).
+    incremental: bool,
 }
 
 impl<'a> ClientProgressForwarder<'a> {
@@ -432,6 +453,7 @@ impl<'a> ClientProgressForwarder<'a> {
             pending_transfers,
             announced: None,
             flist_eof: true,
+            incremental,
         }
     }
 
@@ -458,6 +480,7 @@ impl<'a> ClientProgressForwarder<'a> {
             pending_transfers: HashMap::new(),
             announced: None,
             flist_eof: false,
+            incremental: true,
         }
     }
 
@@ -529,6 +552,7 @@ impl<'a> ClientProgressForwarder<'a> {
             overall_elapsed: elapsed,
             flist_eof: true,
             transfer_complete: true,
+            list_done: false,
         };
         self.observer.on_progress(&update);
     }
@@ -603,6 +627,7 @@ impl<'a> LocalCopyRecordHandler for ClientProgressForwarder<'a> {
             overall_elapsed: self.overall_start.elapsed(),
             flist_eof: self.flist_eof,
             transfer_complete: false,
+            list_done: false,
         };
 
         self.observer.on_progress(&update);
@@ -615,6 +640,41 @@ impl<'a> LocalCopyRecordHandler for ClientProgressForwarder<'a> {
         self.total = self.total.saturating_add(entries);
         let total_bytes = self.overall_total_bytes.unwrap_or(0).saturating_add(bytes);
         self.overall_total_bytes = (total_bytes > 0).then_some(total_bytes);
+    }
+
+    /// upstream: sender.c:533-537 - at the `NDX_DONE` of each finished
+    /// sub-list the sender calls `end_progress(0)` under `--info=progress2`,
+    /// redrawing `(xfr#N, ir-chk=R/T)` in place, so the line keeps moving
+    /// while the generator checks up-to-date files. Without INC_RECURSE the
+    /// one list's `NDX_DONE` is the end of the run, which
+    /// [`finalize`](Self::finalize) reports.
+    fn handle_file_list_done(&mut self) {
+        if !self.incremental || self.dry_run || self.total == 0 {
+            return;
+        }
+        let flist_total = self.overall_total_bytes.unwrap_or(0);
+        let elapsed = self.overall_start.elapsed();
+        let update = ClientProgressUpdate {
+            event: ClientEvent::from_progress(
+                Path::new(""),
+                self.overall_transferred,
+                Some(flist_total),
+                elapsed,
+                Arc::clone(&self.destination_root),
+            ),
+            total: self.total,
+            remaining: self.total.saturating_sub(self.checked),
+            index: self.transferred,
+            total_bytes: Some(flist_total),
+            final_update: true,
+            overall_transferred: self.overall_transferred,
+            overall_total_bytes: Some(flist_total),
+            overall_elapsed: elapsed,
+            flist_eof: self.flist_eof,
+            transfer_complete: false,
+            list_done: true,
+        };
+        self.observer.on_progress(&update);
     }
 
     fn handle_transfer_start(&mut self, record: &LocalCopyRecord) {
@@ -679,6 +739,7 @@ impl<'a> LocalCopyRecordHandler for ClientProgressForwarder<'a> {
             overall_elapsed: self.overall_start.elapsed(),
             flist_eof: self.flist_eof,
             transfer_complete: false,
+            list_done: false,
         };
 
         self.observer.on_progress(&update);
@@ -715,6 +776,7 @@ mod tests {
             overall_elapsed: Duration::from_secs(5),
             flist_eof: true,
             transfer_complete: false,
+            list_done: false,
         }
     }
 

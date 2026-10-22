@@ -738,6 +738,9 @@ fn copy_directory_recursive_inner(
     }
 
     context.clear_checksum_cache();
+    // upstream: generator.c:2731-2739 - with every entry of this directory's
+    // sub-list processed, the generator sends NDX_DONE for it.
+    context.notify_file_list_done();
 
     handle_post_transfer_deletions(
         context,

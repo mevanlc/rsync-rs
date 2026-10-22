@@ -729,6 +729,13 @@ impl<'a> CopyContext<'a> {
         }
     }
 
+    /// Tells the observer every entry of the directory just walked is done.
+    pub(super) fn notify_file_list_done(&mut self) {
+        if let Some(observer) = &mut self.observer {
+            observer.handle_file_list_done();
+        }
+    }
+
     /// Hands the observer the record a regular-file transfer is about to
     /// produce, before any of its data moves.
     pub(super) fn notify_transfer_start(&mut self, record: &LocalCopyRecord) {

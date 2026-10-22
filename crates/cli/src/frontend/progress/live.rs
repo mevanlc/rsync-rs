@@ -196,6 +196,13 @@ pub(crate) struct LiveProgress<'a> {
     session_started: bool,
     /// Whether the transfer's sender names each file itself, as on a push.
     sender_names_files: bool,
+    /// Whether the run's last progress2 line, the one reaching `to-chk=0`,
+    /// has been printed. A sub-list finishing after it would only repeat it.
+    overall_ended: bool,
+    /// When, and at what byte count, the first file data was shown: the
+    /// `(xfr#N, ..)` lines report the time and average rate since then.
+    /// upstream: progress.c:204-212 `ph_start`.
+    overall_start: Option<(Instant, u64)>,
 }
 
 impl<'a> LiveProgress<'a> {
@@ -239,6 +246,8 @@ impl<'a> LiveProgress<'a> {
             session_started: false,
             deferred: Vec::new(),
             sender_names_files: false,
+            overall_ended: false,
+            overall_start: None,
         }
     }
 
@@ -437,8 +446,16 @@ impl<'a> ClientProgressObserver for LiveProgress<'a> {
         }
         let result = (|| -> io::Result<()> {
             if is_generator_notice(event) {
+                // Every up-to-date entry is a notice, though one prints only at
+                // -vv; ending the progress line for one that prints nothing
+                // would strand each progress2 redraw on a line of its own.
+                let mut notice = Vec::new();
+                listing.render(event, self.human_readable, session.escape, &mut notice)?;
+                if notice.is_empty() {
+                    return Ok(());
+                }
                 self.end_active_line()?;
-                listing.render(event, self.human_readable, session.escape, self.writer)?;
+                self.writer.write_all(&notice)?;
                 return self.flush_if_needed();
             }
             listing.render(
@@ -462,10 +479,16 @@ impl<'a> ClientProgressObserver for LiveProgress<'a> {
             return;
         }
 
-        // upstream: receiver.c:852-857 - the NDX_DONE end_progress(0) summary
-        // is emitted only under --info=progress2. Per-file progress mode has no
-        // terminal summary line, so drop the synthetic transfer-complete tick.
-        if update.is_transfer_complete() && matches!(self.mode, ProgressMode::PerFile) {
+        // upstream: receiver.c:852-857 and sender.c:533-537 - the NDX_DONE
+        // end_progress(0) lines, for the end of the run and for each finished
+        // sub-list, are emitted only under --info=progress2. Per-file progress
+        // mode has no such lines, so drop the synthetic ticks.
+        if (update.is_transfer_complete() || update.is_list_done())
+            && matches!(self.mode, ProgressMode::PerFile)
+        {
+            return;
+        }
+        if update.is_list_done() && self.overall_ended {
             return;
         }
 
@@ -612,27 +635,51 @@ impl<'a> ClientProgressObserver for LiveProgress<'a> {
 
                 let bytes = update.overall_transferred();
                 self.overall_remaining.observe(now, bytes);
+                // upstream: progress.c:204-212 - `ph_start` is taken at the
+                // first file data shown, never by an NDX_DONE line.
+                if self.overall_start.is_none()
+                    && !update.is_list_done()
+                    && !update.is_transfer_complete()
+                {
+                    self.overall_start = Some((now, bytes));
+                }
                 let size_field =
                     format!("{:>15}", format_progress_bytes(bytes, self.human_readable));
                 let percent_field = format!(
                     "{:>4}",
                     format_progress_percent(bytes, update.overall_total_bytes())
                 );
-                // upstream: progress.c:102-116 - progress2 uses the sliding-window
-                // rate from the 5-slot ring buffer, not the cumulative rate.
-                let window_rate = self
-                    .overall_remaining
-                    .window_rate(now, bytes)
-                    .unwrap_or(0.0);
+                // upstream: progress.c:88-93 - an `(xfr#..)` line reports the
+                // average rate and the total time since `ph_start`; before any
+                // data has been shown both are zero. progress.c:102-116 - an
+                // in-flight tick uses the sliding-window rate from the 5-slot
+                // ring buffer and its time-remaining estimate.
+                let since_start = self.overall_start.map(|(at, ofs)| {
+                    let elapsed = now.saturating_duration_since(at);
+                    let millis = elapsed.as_millis().max(1) as f64;
+                    (elapsed, bytes.saturating_sub(ofs) as f64 * 1000.0 / millis)
+                });
+                let rate = if is_final {
+                    since_start.map_or(0.0, |(_, rate)| rate)
+                } else {
+                    self.overall_remaining
+                        .window_rate(now, bytes)
+                        .unwrap_or(0.0)
+                };
                 let rate_field = format!(
                     "{:>11}",
-                    format_progress_rate_from_value(window_rate, self.human_readable)
+                    format_progress_rate_from_value(rate, self.human_readable)
                 );
-                // upstream: progress.c:97-105 - sliding window ETA mid-transfer,
-                // total elapsed for the final tick.
-                let final_tick = update.remaining() == 0 && is_final;
-                let time_text = if final_tick {
-                    format_progress_elapsed(update.overall_elapsed())
+                // The run's last line reaches `to-chk=0` once the list is
+                // complete; a finished sub-list never ends the run.
+                let final_tick = update.remaining() == 0
+                    && is_final
+                    && update.flist_eof()
+                    && !update.is_list_done();
+                let time_text = if is_final {
+                    format_progress_elapsed(
+                        since_start.map_or(Duration::ZERO, |(elapsed, _)| elapsed),
+                    )
                 } else {
                     let total = update.overall_total_bytes().unwrap_or(bytes);
                     self.overall_remaining.render(now, bytes, total)
@@ -665,6 +712,7 @@ impl<'a> ClientProgressObserver for LiveProgress<'a> {
                         // it here to separate from the summary block.
                         writeln!(self.writer)?;
                         Self::set_line_active(false);
+                        self.overall_ended = true;
                     } else {
                         // Newline suppressed for progress2 per
                         // progress.c:88 - cursor stays on same line.
