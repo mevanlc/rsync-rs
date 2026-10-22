@@ -12,12 +12,221 @@
 //! the raw `ERROR_PRIVILEGE_NOT_HELD` so the caller can skip the entry with a
 //! warning and a soft (exit 23) error rather than aborting.
 //!
+//! A symbolic link created inside WSL on an NTFS volume is a third kind: an
+//! `IO_REPARSE_TAG_LX_SYMLINK` reparse point holding the POSIX target as
+//! UTF-8. `std::fs` reports it as a symlink but cannot read it ("Unsupported
+//! reparse point type"), so [`read_link`] reads it here, and
+//! [`create_wsl_symlink`] writes one back, which needs no privilege. Cygwin,
+//! upstream rsync's Windows runtime, reads these as symlinks too.
+//!
 //! This is the designated encapsulation point for the raw Win32 reparse-point
 //! calls; consumer crates (`engine`, `transfer`) reach it through the safe
 //! functions here and never touch `unsafe` themselves.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Reparse tag of a symbolic link WSL creates on an NTFS volume.
+#[cfg(windows)]
+const IO_REPARSE_TAG_LX_SYMLINK: u32 = 0xA000_001D;
+
+/// Format version WSL writes ahead of an LX symlink's target. The target
+/// follows as UTF-8 with no terminator.
+#[cfg(windows)]
+const LX_SYMLINK_VERSION: u32 = 2;
+
+/// Largest reparse buffer the kernel accepts or returns.
+#[cfg(windows)]
+const MAX_REPARSE_DATA_BUFFER_SIZE: usize = 16 * 1024;
+
+/// Reads the target of the symbolic link at `path`, including a WSL symlink
+/// that [`std::fs::read_link`] refuses.
+///
+/// # Errors
+///
+/// Returns [`std::fs::read_link`]'s error when `path` is not a symbolic link
+/// of any kind it or WSL writes.
+pub fn read_link(path: &Path) -> io::Result<PathBuf> {
+    let error = match std::fs::read_link(path) {
+        Ok(target) => return Ok(target),
+        Err(error) => error,
+    };
+    #[cfg(windows)]
+    if let Ok(Some(target)) = read_reparse_buffer(path).map(|buffer| wsl_symlink_target(&buffer)) {
+        return Ok(target);
+    }
+    Err(error)
+}
+
+/// Reports whether `path` is a symbolic link WSL created.
+#[cfg(windows)]
+pub fn is_wsl_symlink(path: &Path) -> bool {
+    read_reparse_buffer(path)
+        .is_ok_and(|buffer| reparse_tag(&buffer) == Some(IO_REPARSE_TAG_LX_SYMLINK))
+}
+
+/// Creates a symbolic link at `link` pointing to `target` in the form WSL
+/// writes, so WSL resolves the copy exactly as it did the original. Unlike
+/// [`create_file_symlink`] this needs no privilege.
+///
+/// # Errors
+///
+/// Fails with [`io::ErrorKind::InvalidInput`] when `target` is not UTF-8 or
+/// too long for a reparse point, and otherwise propagates the failure to
+/// create `link` or to set its reparse point; `link` is removed again in the
+/// latter case.
+#[cfg(windows)]
+pub fn create_wsl_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    let target = target.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "WSL symlink target is not valid UTF-8",
+        )
+    })?;
+    let buffer = wsl_symlink_buffer(target)?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(link)?;
+    if let Err(error) = set_reparse_point(&file, &buffer) {
+        drop(file);
+        let _ = std::fs::remove_file(link);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Builds the reparse buffer WSL writes for a link to `target`.
+#[cfg(windows)]
+fn wsl_symlink_buffer(target: &str) -> io::Result<Vec<u8>> {
+    // ReparseTag(4) + ReparseDataLength(2) + Reserved(2), then the data.
+    let data_length = 4 + target.len();
+    let too_long = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "WSL symlink target exceeds the maximum reparse-point size",
+        )
+    };
+    if 8 + data_length > MAX_REPARSE_DATA_BUFFER_SIZE {
+        return Err(too_long());
+    }
+    let length = u16::try_from(data_length).map_err(|_| too_long())?;
+    let mut buffer = Vec::with_capacity(8 + data_length);
+    buffer.extend_from_slice(&IO_REPARSE_TAG_LX_SYMLINK.to_le_bytes());
+    buffer.extend_from_slice(&length.to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes());
+    buffer.extend_from_slice(&LX_SYMLINK_VERSION.to_le_bytes());
+    buffer.extend_from_slice(target.as_bytes());
+    Ok(buffer)
+}
+
+/// Returns the reparse tag at the head of a reparse buffer.
+#[cfg(windows)]
+fn reparse_tag(buffer: &[u8]) -> Option<u32> {
+    Some(u32::from_le_bytes(buffer.get(..4)?.try_into().ok()?))
+}
+
+/// Returns the target of a WSL symlink's reparse buffer, or `None` when the
+/// buffer holds another kind of reparse point or a version this does not read.
+#[cfg(windows)]
+fn wsl_symlink_target(buffer: &[u8]) -> Option<PathBuf> {
+    if reparse_tag(buffer)? != IO_REPARSE_TAG_LX_SYMLINK {
+        return None;
+    }
+    let length = usize::from(u16::from_le_bytes(buffer.get(4..6)?.try_into().ok()?));
+    let data = buffer.get(8..8 + length)?;
+    if u32::from_le_bytes(data.get(..4)?.try_into().ok()?) != LX_SYMLINK_VERSION {
+        return None;
+    }
+    std::str::from_utf8(&data[4..]).ok().map(PathBuf::from)
+}
+
+/// Reads the reparse buffer of `path` without following it.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn read_reparse_buffer(path: &Path) -> io::Result<Vec<u8>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let mut buffer = vec![0u8; MAX_REPARSE_DATA_BUFFER_SIZE];
+    let mut returned: u32 = 0;
+    // SAFETY: `file` owns a live handle opened with reparse-point semantics.
+    // FSCTL_GET_REPARSE_POINT takes no input and writes at most `buffer.len()`
+    // bytes into the heap buffer, reporting the count through `returned`;
+    // `lpOverlapped` is null for the synchronous handle.
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle() as HANDLE,
+            FSCTL_GET_REPARSE_POINT,
+            std::ptr::null(),
+            0,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    buffer.truncate(returned as usize);
+    Ok(buffer)
+}
+
+/// Writes the reparse buffer `buffer` onto the open `file`.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn set_reparse_point(file: &std::fs::File, buffer: &[u8]) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+
+    let mut bytes_returned: u32 = 0;
+    // SAFETY: `file` owns a live handle opened with write access and
+    // reparse-point semantics. `buffer` is a correctly laid-out
+    // REPARSE_DATA_BUFFER of `buffer.len()` bytes. FSCTL_SET_REPARSE_POINT
+    // writes no output, so the out buffer is null / zero-length;
+    // `lpBytesReturned` points at a valid u32 and `lpOverlapped` is null for
+    // the synchronous handle.
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle() as HANDLE,
+            FSCTL_SET_REPARSE_POINT,
+            buffer.as_ptr().cast(),
+            buffer.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
 
 /// Which reparse-point kind actually landed on disk for a Windows directory
 /// link request.
@@ -146,21 +355,15 @@ fn try_create_symlink(target: &Path, link: &Path, directory: bool) -> io::Result
 /// Builds a junction (mount-point reparse point) at `link` pointing to the
 /// absolute location of `target`, mirroring `mklink /J`.
 #[cfg(windows)]
-#[allow(unsafe_code)]
 fn create_junction(target: &Path, link: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::AsRawHandle;
 
-    use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     };
-    use windows_sys::Win32::System::IO::DeviceIoControl;
-    use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
 
     const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
-    const MAX_REPARSE_DATA_BUFFER_SIZE: usize = 16 * 1024;
     // \\?\  verbatim prefix that canonicalize() prepends.
     const VERBATIM_PREFIX: [u16; 4] = [0x5C, 0x5C, 0x3F, 0x5C];
     // \??\  NT-namespace prefix a mount-point substitute name requires.
@@ -230,28 +433,7 @@ fn create_junction(target: &Path, link: &Path) -> io::Result<()> {
         }
     };
 
-    let handle = dir.as_raw_handle() as HANDLE;
-    let mut bytes_returned: u32 = 0;
-    // SAFETY: `handle` is a live directory handle owned by `dir`, opened with
-    // write access and reparse-point semantics. `buf` is a correctly laid-out
-    // REPARSE_DATA_BUFFER of `buf.len()` bytes. FSCTL_SET_REPARSE_POINT writes
-    // no output, so the out buffer is null / zero-length; `lpBytesReturned`
-    // points at a valid u32 and `lpOverlapped` is null for the synchronous
-    // handle.
-    let ok = unsafe {
-        DeviceIoControl(
-            handle,
-            FSCTL_SET_REPARSE_POINT,
-            buf.as_ptr() as *const core::ffi::c_void,
-            buf.len() as u32,
-            std::ptr::null_mut(),
-            0,
-            &mut bytes_returned,
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        let err = io::Error::last_os_error();
+    if let Err(err) = set_reparse_point(&dir, &buf) {
         drop(dir);
         let _ = std::fs::remove_dir(link);
         return Err(err);
@@ -295,6 +477,26 @@ pub fn is_unprivileged_symlink_error(_err: &io::Error) -> bool {
     false
 }
 
+/// Non-Windows stub: WSL symlinks exist only on Windows volumes; inside WSL
+/// itself they are ordinary symlinks.
+#[cfg(not(windows))]
+pub fn is_wsl_symlink(_path: &Path) -> bool {
+    false
+}
+
+/// Non-Windows stub: the WSL-symlink helper is Windows-only.
+///
+/// # Errors
+///
+/// Always returns [`io::ErrorKind::Unsupported`].
+#[cfg(not(windows))]
+pub fn create_wsl_symlink(_target: &Path, _link: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "WSL symlink helper is Windows-only",
+    ))
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
@@ -327,6 +529,58 @@ mod tests {
         let through = fs::read_to_string(link.join("inside.txt"))
             .expect("read target file through the directory link");
         assert_eq!(through, "hello");
+    }
+
+    /// A link written in WSL's form reads back through [`read_link`] with its
+    /// POSIX target intact, although `std::fs::read_link` cannot read it.
+    #[test]
+    fn wsl_symlink_round_trips_through_read_link() {
+        let dir = test_support::create_tempdir();
+        let link = dir.path().join("python");
+        let target = Path::new("/home/user/.local/share/uv/python/bin/python3.11");
+
+        create_wsl_symlink(target, &link).expect("create WSL symlink");
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("lstat")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(is_wsl_symlink(&link));
+        assert!(fs::read_link(&link).is_err(), "std cannot read WSL links");
+        assert_eq!(read_link(&link).expect("read WSL link"), target);
+    }
+
+    /// The buffer matches what WSL writes: the tag, the data length, version 2
+    /// and the UTF-8 target with no terminator.
+    #[test]
+    fn wsl_symlink_buffer_has_wsl_layout() {
+        let buffer = wsl_symlink_buffer("python3.11").expect("buffer");
+        let mut expected = vec![0x1D, 0x00, 0x00, 0xA0, 14, 0, 0, 0, 2, 0, 0, 0];
+        expected.extend_from_slice(b"python3.11");
+        assert_eq!(buffer, expected);
+        assert_eq!(
+            wsl_symlink_target(&buffer).as_deref(),
+            Some(Path::new("python3.11"))
+        );
+    }
+
+    /// Other reparse points are not WSL links, and a native symlink still
+    /// reads through `std`.
+    #[test]
+    fn read_link_leaves_other_links_to_std() {
+        let dir = test_support::create_tempdir();
+        let target = dir.path().join("real_dir");
+        fs::create_dir(&target).expect("create target");
+        let link = dir.path().join("link");
+        create_directory_symlink_or_junction(&target, &link).expect("directory link");
+
+        assert!(!is_wsl_symlink(&link));
+        assert!(!is_wsl_symlink(&target));
+        let buffer = read_reparse_buffer(&link).expect("reparse buffer");
+        assert_eq!(wsl_symlink_target(&buffer), None);
+        assert!(read_link(&link).is_ok());
     }
 
     /// The file-symlink helper never panics: it either creates the link (when

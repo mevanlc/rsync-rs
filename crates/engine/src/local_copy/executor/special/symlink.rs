@@ -145,7 +145,7 @@ pub(crate) fn copy_symlink(
     // short by the target length (e.g. 50 vs upstream's 55 for a 5-byte link).
     context.summary_mut().record_total_bytes(metadata.len());
 
-    let raw_target = fs::read_link(source)
+    let raw_target = fast_io::read_link(source)
         .map_err(|error| LocalCopyError::io("read symbolic link", source, error))?;
 
     // upstream: clientserver.c - on the sender side, unmunge already-munged
@@ -390,7 +390,7 @@ pub(crate) fn copy_symlink(
     let symlink_target_unchanged = destination_metadata
         .as_ref()
         .is_some_and(|existing| existing.file_type().is_symlink())
-        && fs::read_link(destination)
+        && fast_io::read_link(destination)
             .map(|existing_target| existing_target == target)
             .unwrap_or(false);
 
@@ -889,8 +889,15 @@ pub(crate) fn create_symlink(target: &Path, _source: &Path, destination: &Path) 
 /// caller lacks the create-symlink privilege (unprivileged, no Developer Mode).
 /// File links have no junction equivalent, so a privilege refusal surfaces as
 /// `ERROR_PRIVILEGE_NOT_HELD`; the caller skips the entry with a warning.
+///
+/// A link WSL created is copied as one ([`fast_io::create_wsl_symlink`]): its
+/// target is a POSIX path only WSL resolves, and WSL's form needs no
+/// privilege.
 #[cfg(windows)]
 pub(crate) fn create_symlink(target: &Path, source: &Path, destination: &Path) -> io::Result<()> {
+    if fast_io::is_wsl_symlink(source) {
+        return fast_io::create_wsl_symlink(target, destination);
+    }
     let is_dir = matches!(source.metadata(), Ok(metadata) if metadata.file_type().is_dir());
     if is_dir {
         fast_io::create_directory_symlink_or_junction(target, destination).map(|_| ())

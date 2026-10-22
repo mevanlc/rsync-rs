@@ -59,7 +59,7 @@ fn build_protocol_file_entry(
     } else if file_type.is_symlink() {
         // upstream: flist.c:send_file_entry() - symlink target is read and
         // included in the flist entry so batch replay can recreate symlinks.
-        let link_target = fs::read_link(source_path).unwrap_or_default();
+        let link_target = fast_io::read_link(source_path).unwrap_or_default();
         // upstream: flist.c:1887 - symlinks carry stat.st_size (the target byte
         // length), matching the directory case above; only devices/specials are
         // zeroed.

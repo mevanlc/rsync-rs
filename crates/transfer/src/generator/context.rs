@@ -1003,7 +1003,7 @@ impl GeneratorContext {
             // readlink to fall back to, so this preserves the previous
             // behaviour rather than adding a defence - it is not one.
         }
-        std::fs::read_link(full_path)
+        fast_io::read_link(full_path)
     }
 
     /// Whether the source open must apply confinement or `O_NOFOLLOW`, which

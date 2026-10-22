@@ -32,7 +32,7 @@ fn record_skipped_symlink(
 ) {
     context.summary_mut().record_symlink_total();
     if let Some(relative_path) = record_path {
-        match fs::read_link(source_path) {
+        match fast_io::read_link(source_path) {
             Ok(target) => {
                 // Same NONREG notice record_skipped_non_regular would emit; only
                 // the record differs, since this one carries a link-target

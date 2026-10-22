@@ -458,7 +458,7 @@ pub(crate) fn copy_entry_to_backup(
         return Ok(Some(BackupStrategy::Copy));
     }
     if file_type.is_symlink() {
-        let target = fs::read_link(source)
+        let target = fast_io::read_link(source)
             .map_err(|error| LocalCopyError::io("read symbolic link", source, error))?;
         create_backup_symlink(&target, source, backup_path)
             .map_err(|error| LocalCopyError::io("create symbolic link", backup_path, error))?;

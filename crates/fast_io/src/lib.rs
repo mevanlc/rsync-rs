@@ -518,8 +518,8 @@ pub use win_atomic_commit::{create_new_no_follow, rename_no_follow};
 pub use win_path::to_extended_path;
 pub use win_sparse::mark_file_sparse;
 pub use win_symlink::{
-    WindowsDirLink, create_directory_symlink_or_junction, create_file_symlink,
-    is_unprivileged_symlink_error,
+    WindowsDirLink, create_directory_symlink_or_junction, create_file_symlink, create_wsl_symlink,
+    is_unprivileged_symlink_error, is_wsl_symlink, read_link,
 };
 pub use win_tmpfile::{
     WinDeleteOnCloseSupport, WinTempFileResult, WindowsTempFile, clear_delete_on_close,

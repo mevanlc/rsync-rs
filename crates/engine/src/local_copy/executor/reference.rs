@@ -433,7 +433,7 @@ fn find_reference_symlink(
         // upstream: generator.c:642-646 quick_check_ok() FT_SYMLINK - a readlink
         // that fails (`len <= 0`) returns 0, which try_dests_non() turns into a
         // `continue`. The unreadable basis link is skipped, never fatal.
-        match fs::read_link(&candidate) {
+        match fast_io::read_link(&candidate) {
             Ok(basis_target) if basis_target == target => {
                 return Ok(Some(candidate_metadata));
             }

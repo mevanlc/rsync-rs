@@ -324,7 +324,7 @@ pub(crate) fn plan_directory_entries<'a>(
         // the CopySymlink action in place so that copy_symlink() can
         // handle it and record the SkippedUnsafeSymlink event properly.
         if matches!(action, EntryAction::CopySymlink) && context.copy_unsafe_links_enabled() {
-            match fs::read_link(entry.path.as_path()) {
+            match fast_io::read_link(entry.path.as_path()) {
                 Ok(target) => {
                     let safety_rel = context.strip_safety_prefix(relative_path.as_path());
                     if !symlink_target_is_safe(&target, safety_rel) {

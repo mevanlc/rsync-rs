@@ -113,7 +113,7 @@ pub(crate) fn prefetch_entry_metadata(
             };
 
             let symlink_target = if is_symlink && config.read_symlink_targets {
-                Some(fs::read_link(&entry.path))
+                Some(fast_io::read_link(&entry.path))
             } else {
                 None
             };

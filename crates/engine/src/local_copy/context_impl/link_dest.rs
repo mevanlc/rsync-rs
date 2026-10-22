@@ -136,7 +136,7 @@ impl<'a> CopyContext<'a> {
                 continue;
             }
 
-            match fs::read_link(&candidate) {
+            match fast_io::read_link(&candidate) {
                 Ok(basis_target) if basis_target == target => return Ok(Some(candidate)),
                 Ok(_) => continue,
                 Err(error) => {

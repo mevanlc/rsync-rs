@@ -24,7 +24,7 @@ impl<'a> CopyContext<'a> {
             return false;
         }
 
-        let Ok(target) = fs::read_link(destination) else {
+        let Ok(target) = fast_io::read_link(destination) else {
             // upstream: backup.c:296-297
             info_log!(
                 Symsafe,
