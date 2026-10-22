@@ -3536,6 +3536,37 @@ fn apply_file_metadata_sets_times_before_readonly_chmod() {
     assert_eq!(current_mode(&dest) & 0o777, 0o444);
 }
 
+/// A destination that is already read-only still takes its times on Windows,
+/// as it does under upstream's `utimensat`. A local copy through
+/// `CopyFileExW` carries a read-only source's attribute (every git pack file)
+/// onto the destination before the times are applied.
+#[cfg(windows)]
+#[test]
+fn apply_file_metadata_sets_times_on_read_only_destination() {
+    let temp = test_support::create_tempdir();
+    let source = temp.path().join("ro-source.idx");
+    let dest = temp.path().join("ro-dest.idx");
+    fs::write(&source, b"data").expect("write source");
+    fs::write(&dest, b"data").expect("write dest");
+    let mtime = FileTime::from_unix_time(1_700_000_000, 123_456_700);
+    set_file_times(&source, mtime, mtime).expect("set source times");
+    for path in [&source, &dest] {
+        let mut permissions = fs::metadata(path).expect("stat").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(path, permissions).expect("make read-only");
+    }
+
+    let metadata = fs::metadata(&source).expect("source metadata");
+    let opts = MetadataOptions::new()
+        .preserve_permissions(true)
+        .preserve_times(true);
+    apply_file_metadata_with_options(&dest, &metadata, &opts).expect("apply metadata");
+
+    let dest_meta = fs::metadata(&dest).expect("dest metadata");
+    assert_eq!(FileTime::from_last_modification_time(&dest_meta), mtime);
+    assert!(dest_meta.permissions().readonly());
+}
+
 /// Order pin for the local-copy file arm: on a missing destination the FIRST
 /// failing attribute operation names itself in the error. upstream
 /// `set_file_attrs()` reaches its times set (rsync.c:769-791) before its chmod

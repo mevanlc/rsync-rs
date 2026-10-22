@@ -221,12 +221,14 @@ mod imp {
     use std::thread::sleep;
     use std::time::Duration;
 
-    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, HANDLE};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-        FILE_GENERIC_WRITE, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FileRenameInfo, GetFileInformationByHandle, SetFileInformationByHandle,
+        FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FileBasicInfo, FileRenameInfo,
+        GetFileInformationByHandle, SetFileInformationByHandle,
     };
 
     /// Shared-access mask allowing concurrent readers, writers, and deleters so
@@ -418,9 +420,80 @@ mod imp {
         // (3) Handle-based rename. RootDirectory=NULL + full destination path;
         // the pinned parent handle (`dir`) is held open across the call so the
         // final directory component cannot be swapped for a reparse point.
-        let result = set_rename_info(&src, dest_path.as_os_str(), replace_existing);
+        let mut result = set_rename_info(&src, dest_path.as_os_str(), replace_existing);
+        // A read-only destination refuses the replace with ERROR_ACCESS_DENIED,
+        // where upstream's do_rename (POSIX rename(2)) replaces a file whatever
+        // its mode. Clear the attribute and replace it once more; the new file
+        // carries its own attributes. Should that fail too, the old file gets
+        // its attribute back.
+        if replace_existing
+            && result
+                .as_ref()
+                .is_err_and(|err| err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32))
+            && set_readonly_no_follow(dest_path, false)
+        {
+            result = set_rename_info(&src, dest_path.as_os_str(), replace_existing);
+            if result.is_err() {
+                set_readonly_no_follow(dest_path, true);
+            }
+        }
         drop(dir);
         result
+    }
+
+    /// Sets or clears `FILE_ATTRIBUTE_READONLY` on `path` through a no-follow
+    /// handle, reporting whether the attribute changed. A reparse point, or a
+    /// path that cannot be opened, is left alone. The handle is closed on
+    /// return, so it never holds up a rename onto `path`.
+    fn set_readonly_no_follow(path: &Path, readonly: bool) -> bool {
+        let Ok(file) = OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+            .share_mode(SHARE_ALL)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+        else {
+            return false;
+        };
+        let Ok(attrs) = file_attributes(&file) else {
+            return false;
+        };
+        let is_readonly = attrs & FILE_ATTRIBUTE_READONLY != 0;
+        if is_readonly == readonly || attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+        let attrs = if readonly {
+            attrs | FILE_ATTRIBUTE_READONLY
+        } else {
+            attrs & !FILE_ATTRIBUTE_READONLY
+        };
+        // FILE_BASIC_INFO reads zero as "leave unchanged", for the times and
+        // the attributes alike, so a file left with no attribute takes
+        // FILE_ATTRIBUTE_NORMAL instead.
+        let info = FILE_BASIC_INFO {
+            CreationTime: 0,
+            LastAccessTime: 0,
+            LastWriteTime: 0,
+            ChangeTime: 0,
+            FileAttributes: if attrs == 0 {
+                FILE_ATTRIBUTE_NORMAL
+            } else {
+                attrs
+            },
+        };
+        // SAFETY: `file` owns a valid handle opened with FILE_WRITE_ATTRIBUTES
+        // for the duration of the call, and `info` is a fully initialised
+        // FILE_BASIC_INFO whose size is passed alongside it; the call only
+        // reads from the buffer and returns 0 on failure.
+        #[allow(unsafe_code)]
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                FileBasicInfo,
+                std::ptr::addr_of!(info).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        };
+        ok != 0
     }
 
     /// Returns the file attribute bitmask of an open handle.
@@ -535,6 +608,40 @@ mod imp {
 
             rename_no_follow(&temp, &dest, true).expect("replace");
             assert_eq!(std::fs::read(&dest).expect("read"), b"new");
+        }
+
+        /// A read-only destination is replaced too, as POSIX `rename(2)`
+        /// replaces a file whatever its mode (upstream `do_rename`). Git marks
+        /// its pack files read-only, so an update of one must not fail.
+        #[test]
+        fn rename_no_follow_replaces_read_only_destination() {
+            let dir = test_support::create_tempdir();
+            for (name, archive) in [("archived.idx", true), ("bare.idx", false)] {
+                let dest = dir.path().join(name);
+                std::fs::write(&dest, b"old").expect("seed dest");
+                let mut permissions = std::fs::metadata(&dest).expect("stat").permissions();
+                permissions.set_readonly(true);
+                std::fs::set_permissions(&dest, permissions).expect("make read-only");
+                if !archive {
+                    // Leave READONLY as the only attribute, which FILE_BASIC_INFO
+                    // cannot clear by writing zero.
+                    let status = std::process::Command::new("attrib")
+                        .args(["-A"])
+                        .arg(&dest)
+                        .status()
+                        .expect("run attrib");
+                    assert!(status.success());
+                }
+                let temp = dir.path().join(format!(".{name}.Qw3rty"));
+                {
+                    let mut f = create_new_no_follow(&temp).expect("create temp");
+                    f.write_all(b"new").expect("write");
+                }
+
+                rename_no_follow(&temp, &dest, true).expect("replace read-only");
+                assert_eq!(std::fs::read(&dest).expect("read"), b"new");
+                assert!(!temp.exists());
+            }
         }
 
         /// `create_new_no_follow` fails with `AlreadyExists` when the name is

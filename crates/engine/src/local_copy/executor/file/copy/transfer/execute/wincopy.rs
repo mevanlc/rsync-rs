@@ -217,13 +217,25 @@ pub(super) fn try_copy(
 /// assumes the file already has process-default metadata. This function
 /// bridges that gap by resetting mtime to the current time so the finalize
 /// step works identically to the standard copy path.
+///
+/// The copy also carries a read-only source's attribute, so the time is set
+/// through a `FILE_WRITE_ATTRIBUTES` handle, which a read-only file grants,
+/// rather than one opened for write, which it refuses.
 fn normalize_copied_metadata(
     destination: &Path,
     options: &::metadata::MetadataOptions,
 ) -> Result<(), LocalCopyError> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    /// `FILE_WRITE_ATTRIBUTES` access right (`winnt.h`).
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+
     if !options.times() {
         let now = filetime::FileTime::now();
-        filetime::set_file_mtime(destination, now)
+        fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .open(destination)
+            .and_then(|file| filetime::set_file_handle_times(&file, None, Some(now)))
             .map_err(|e| LocalCopyError::io("normalize copied mtime", destination, e))?;
     }
     Ok(())

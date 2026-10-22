@@ -81,11 +81,53 @@ fn set_times_via(
     rustix::fs::utimensat(rustix::fs::CWD, destination, &times, flags).map_err(io::Error::from)
 }
 
-/// Non-Unix counterpart to [`set_times_via`] using the [`filetime`] crate.
+/// Windows counterpart to [`set_times_via`].
 ///
-/// Windows has no `utimensat`; `filetime` opens the target to set its times.
+/// Windows has no `utimensat`, so the target is opened to set its times - with
+/// `FILE_WRITE_ATTRIBUTES` alone, which a read-only file grants. `filetime`'s
+/// path helpers open for write, which the read-only attribute refuses, so a
+/// read-only file (every git pack, say) could not take its times, unlike
+/// upstream, whose `utimensat` never looks at the mode. A `None` time is left
+/// unchanged.
+#[cfg(windows)]
+fn set_times_via(
+    destination: &Path,
+    atime: Option<FileTime>,
+    mtime: Option<FileTime>,
+    follow_symlinks: bool,
+    _parent_walk: super::ParentWalk<'_>,
+    _parent_dirfd: super::ParentDirFd<'_>,
+) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    /// `FILE_WRITE_ATTRIBUTES` access right (`winnt.h`).
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    /// `FILE_FLAG_BACKUP_SEMANTICS` (`winbase.h`): lets the open reach a
+    /// directory as well as a file.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    /// `FILE_FLAG_OPEN_REPARSE_POINT` (`winbase.h`): opens a symlink itself.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    if atime.is_none() && mtime.is_none() {
+        return Ok(());
+    }
+    let flags = if follow_symlinks {
+        FILE_FLAG_BACKUP_SEMANTICS
+    } else {
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+    };
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(flags)
+        .open(destination)?;
+    filetime::set_file_handle_times(&file, atime, mtime)
+}
+
+/// Counterpart to [`set_times_via`] for targets that are neither Unix nor
+/// Windows, using the [`filetime`] crate.
+///
 /// The `None`-atime case updates only the mtime.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn set_times_via(
     destination: &Path,
     atime: Option<FileTime>,
