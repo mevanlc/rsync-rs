@@ -38,8 +38,6 @@ use engine::local_copy::{
     LocalCopyRecordHandler,
 };
 
-use super::ClientError;
-use super::error::map_local_copy_error;
 use super::summary::{ClientEvent, ClientEventKind};
 
 /// Progress update emitted while executing a client transfer.
@@ -250,16 +248,19 @@ where
 /// total that grows as later sub-lists arrive (`ir-chk`).
 const PREVIEW_RECORD_LIMIT: usize = 1000;
 
-/// Counts the records of a bounded preview and stops it past its limit.
+/// Counts the records of a preview, stops it past its limit, and keeps it
+/// from printing the failures the real copy will print.
 struct PreviewLimit {
     records: usize,
+    limit: usize,
     destination_root_created: bool,
 }
 
 impl PreviewLimit {
-    const fn new() -> Self {
+    const fn new(limit: usize) -> Self {
         Self {
             records: 0,
+            limit,
             destination_root_created: false,
         }
     }
@@ -275,7 +276,11 @@ impl LocalCopyRecordHandler for PreviewLimit {
     }
 
     fn should_stop(&self) -> bool {
-        self.records > PREVIEW_RECORD_LIMIT
+        self.records > self.limit
+    }
+
+    fn reports_failures(&self) -> bool {
+        false
     }
 }
 
@@ -339,42 +344,47 @@ impl<'a> ClientProgressForwarder<'a> {
     /// records: past that, the preview stops and the copy streams, learning
     /// its totals as it goes, instead of walking the whole tree twice.
     /// upstream builds its whole file list up front only without INC_RECURSE.
+    ///
+    /// A preview that fails leaves the failure to the copy, which meets and
+    /// reports it itself.
     pub(crate) fn new(
         observer: &'a mut dyn ClientProgressObserver,
         plan: &LocalCopyPlan,
         mode: LocalCopyExecution,
         mut options: LocalCopyOptions,
         incremental: bool,
-    ) -> Result<Self, ClientError> {
+    ) -> Self {
         if !options.events_enabled() {
             options = options.collect_events(true);
         }
 
         // upstream makes no preview pass, so its notices (e.g. `skipping
         // directory`) must not repeat the real run's.
-        let mut limit = PreviewLimit::new();
+        let mut limit = PreviewLimit::new(if incremental {
+            PREVIEW_RECORD_LIMIT
+        } else {
+            usize::MAX
+        });
         let preview = logging::discard_events_from(|| {
-            if incremental {
-                plan.execute_with_report_and_handler(
-                    LocalCopyExecution::DryRun,
-                    options,
-                    Some(&mut limit),
-                )
-            } else {
-                plan.execute_with_report(LocalCopyExecution::DryRun, options)
-            }
+            plan.execute_with_report_and_handler(
+                LocalCopyExecution::DryRun,
+                options,
+                Some(&mut limit),
+            )
         });
         let preview_report = match preview {
             Ok(report) => report,
-            Err(_) if limit.should_stop() => {
-                return Ok(Self::streaming(
-                    observer,
-                    plan,
-                    mode,
-                    limit.destination_root_created,
-                ));
-            }
-            Err(error) => return Err(map_local_copy_error(error)),
+            Err(mut error) => match error.take_completed_run() {
+                // The preview went on past failed entries to its end, as the
+                // copy will; the copy prints them.
+                Some((_, report)) => report,
+                // The preview stopped at its limit, or at a failure the copy
+                // will meet and report itself: count entries as the copy
+                // reaches them instead.
+                None => {
+                    return Self::streaming(observer, plan, mode, limit.destination_root_created);
+                }
+            },
         };
 
         let (summary, records, destination_root) = preview_report.into_parts();
@@ -406,7 +416,7 @@ impl<'a> ClientProgressForwarder<'a> {
                 .collect()
         };
 
-        Ok(Self {
+        Self {
             observer,
             total,
             transferred_total,
@@ -422,7 +432,7 @@ impl<'a> ClientProgressForwarder<'a> {
             pending_transfers,
             announced: None,
             flist_eof: true,
-        })
+        }
     }
 
     /// Builds a forwarder whose file list grows as the copy walks the tree.

@@ -24,6 +24,7 @@ use super::super::refuse_populated_directory;
 use super::super::{
     emit_cannot_convert_filename, name_is_convertible, transcode_filename_component,
 };
+use super::super::{report_entry_failure, retain_entry_failure};
 use super::destination::{ensure_destination_directory, query_destination_state};
 use super::handlers::{
     handle_directory_contents_copy, handle_directory_copy, handle_non_directory_source,
@@ -554,7 +555,7 @@ pub(crate) fn copy_sources(
 
     let result = {
         let context = &mut context;
-        (|| -> Result<(), LocalCopyError> {
+        (|| -> Result<Option<LocalCopyError>, LocalCopyError> {
             let multiple_sources = plan.sources().len() > 1;
             let destination_path = plan.destination_spec().path();
             // upstream: main.c:725 get_local_name() returns NULL under list_only,
@@ -731,9 +732,11 @@ pub(crate) fn copy_sources(
                 // ownership walk, so the operand fails rather than falling back
                 // to the path-following open the walk exists to replace.
                 if let Err(error) = context.set_files_from_base(source) {
-                    eprintln!("{error}");
+                    if context.reports_entry_failures() {
+                        eprintln!("{error}");
+                    }
                     context.record_io_error();
-                    first_io_error.get_or_insert(error);
+                    retain_entry_failure(&mut first_io_error, error);
                     continue;
                 }
                 let result = process_single_source(
@@ -746,33 +749,26 @@ pub(crate) fn copy_sources(
                     destination_root_created,
                 );
                 if let Err(error) = result {
-                    if error.is_vanished_error() {
-                        // upstream: flist.c:1688 - vanished files produce a warning
-                        // and set IOERR_VANISHED, but transfer continues.
-                        // full_fname() wraps the path in double quotes (util1.c:1528).
-                        eprintln!("file has vanished: \"{}\"", source.path().display());
-                        context.record_io_error();
-                        if first_io_error.is_none() {
-                            first_io_error = Some(error);
-                        }
-                    } else if error.is_link_stat_failed() || error.is_change_dir_failed() {
+                    if error.is_link_stat_failed() || error.is_change_dir_failed() {
                         // upstream: flist.c send_file_list() - a missing source
                         // argument prints `link_stat "%s" failed: %s` to stderr,
                         // sets IOERR_GENERAL (exit 23), and the transfer
                         // continues with the remaining sources.
-                        eprintln!("{error}");
-                        context.record_io_error();
-                        if first_io_error.is_none() {
-                            first_io_error = Some(error);
+                        if context.reports_entry_failures() {
+                            eprintln!("{error}");
                         }
+                        context.record_io_error();
+                        retain_entry_failure(&mut first_io_error, error);
                     } else if error.is_io_error() {
                         // upstream: rsync continues transferring remaining sources
                         // when individual entries fail with I/O errors, regardless
-                        // of whether --delete is active.
+                        // of whether --delete is active. A vanished source
+                        // (flist.c:1688) sets IOERR_VANISHED rather than
+                        // IOERR_GENERAL. A failure inside the source's tree
+                        // arrives here already printed.
+                        let error = report_entry_failure(context, error, source.path());
                         context.record_io_error();
-                        if first_io_error.is_none() {
-                            first_io_error = Some(error);
-                        }
+                        retain_entry_failure(&mut first_io_error, error);
                     } else {
                         return Err(error);
                     }
@@ -804,24 +800,24 @@ pub(crate) fn copy_sources(
             // empty queues drain cleanly without side effects).
             if context.mode().is_dry_run() && context.options().get_batch_writer().is_some() {
                 if let Some(error) = first_io_error {
-                    return Err(error);
+                    return Ok(Some(error));
                 }
                 if context.flist_io_error_occurred() || context.unsupported_operation_skipped() {
-                    return Err(LocalCopyError::partial_transfer());
+                    return Ok(Some(LocalCopyError::partial_transfer()));
                 }
-                return Ok(());
+                return Ok(None);
             }
 
             flush_deferred_operations(context)?;
 
             if let Some(error) = first_io_error {
-                return Err(error);
+                return Ok(Some(error));
             }
             // A platform-unsupported entry (a Windows unprivileged file symlink)
             // was skipped with a warning; finish RERR_PARTIAL (23) like upstream
             // FERROR_XFER after a failed do_symlink().
             if context.unsupported_operation_skipped() {
-                return Err(LocalCopyError::partial_transfer());
+                return Ok(Some(LocalCopyError::partial_transfer()));
             }
             // upstream: flist.c:2020 send_file_name() and flist.c:1692-1695
             // make_file() set io_error |= IOERR_GENERAL when an entry is dropped
@@ -829,7 +825,7 @@ pub(crate) fn copy_sources(
             // The per-entry diagnostic was already printed at the skip site, so
             // surface only the summary error here.
             if context.flist_io_error_occurred() {
-                return Err(LocalCopyError::partial_transfer());
+                return Ok(Some(LocalCopyError::partial_transfer()));
             }
             // upstream: sender.c:successful_send() - a source refused by a
             // --remove-source-files safety guard (changed file / destination
@@ -837,7 +833,7 @@ pub(crate) fn copy_sources(
             // exits RERR_PARTIAL (23). The per-entry diagnostic was already
             // printed at the guard site, so surface only the summary error here.
             if context.sender_remove_error_occurred() {
-                return Err(LocalCopyError::partial_transfer());
+                return Ok(Some(LocalCopyError::partial_transfer()));
             }
             // upstream: delete.c:283-285 - a directory obstacle that survived
             // its rmdir logs `could not make way for new %s: %s` at
@@ -846,14 +842,14 @@ pub(crate) fn copy_sources(
             // (23). The per-entry diagnostics were already printed at the
             // refusal site, so surface only the summary error here.
             if context.make_way_error_occurred() {
-                return Err(LocalCopyError::partial_transfer());
+                return Ok(Some(LocalCopyError::partial_transfer()));
             }
             // upstream: generator.c:2490-2522 / hlink.c:486 - a FIFO, device,
             // symlink, or hard link atomic_create() could not make is reported
             // at FERROR_XFER and skipped; got_xfer_error then lifts the exit to
             // RERR_PARTIAL (23). The per-entry line was already printed.
             if context.create_error_occurred() {
-                return Err(LocalCopyError::partial_transfer());
+                return Ok(Some(LocalCopyError::partial_transfer()));
             }
             // upstream: sender.c:790-796 - a source that shrank mid-transfer
             // sets `io_error |= IOERR_GENERAL` and logs one `read errors
@@ -861,7 +857,7 @@ pub(crate) fn copy_sources(
             // RERR_PARTIAL (23). The per-entry diagnostic was already printed
             // at the copy site, so surface only the summary error here.
             if context.source_read_error_occurred() {
-                return Err(LocalCopyError::partial_transfer());
+                return Ok(Some(LocalCopyError::partial_transfer()));
             }
             // upstream: delete.c:91-288 - the delete pass logs each
             // un-removable entry via `rsyserr(FERROR_XFER, ...)` and sets
@@ -869,14 +865,14 @@ pub(crate) fn copy_sources(
             // RERR_PARTIAL (23). The per-entry notice was already printed by
             // the emitter, so surface only the summary error here.
             if context.io_error_requires_partial_exit() {
-                return Err(LocalCopyError::partial_transfer());
+                return Ok(Some(LocalCopyError::partial_transfer()));
             }
-            Ok(())
+            Ok(None)
         })()
     };
 
     match result {
-        Ok(()) => {
+        Ok(owed) => {
             // upstream main.c:331,426: the transfer rate uses `endtime -
             // starttime`, the integer difference of two whole-second time_t
             // marks - not the sum of per-file copy durations (~0 for CoW) and
@@ -886,7 +882,14 @@ pub(crate) fn copy_sources(
             context
                 .summary_mut()
                 .record_wall_clock_elapsed(Duration::from_secs(elapsed_secs));
-            Ok(context.into_outcome())
+            let outcome = context.into_outcome();
+            // upstream: main.c:1338 - a run that went on past failed entries
+            // still prints its totals before log_exit() names the exit code,
+            // so the outcome travels with the error it owes.
+            match owed {
+                None => Ok(outcome),
+                Some(error) => Err(error.with_completed_run(outcome)),
+            }
         }
         Err(error) => {
             context.rollback_on_error(&error);

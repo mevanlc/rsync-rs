@@ -3,6 +3,7 @@
 mod cleanup;
 mod create_failure;
 mod directory;
+mod entry_failure;
 mod file;
 mod iconv;
 mod obstacle;
@@ -24,6 +25,7 @@ pub(crate) use directory::{
     capture_batch_file_entry, copy_directory_recursive, copy_directory_walk_one_level, is_device,
     is_fifo,
 };
+pub(crate) use entry_failure::{report_entry_failure, retain_entry_failure};
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use file::take_fsync_call_count;

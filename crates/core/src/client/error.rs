@@ -4,6 +4,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
+use super::summary::ClientSummary;
 use crate::auth::supported_daemon_digest_list;
 use crate::exit_code::{ErrorCodification, ExitCode, HasExitCode};
 use crate::message::{Message, Role};
@@ -45,6 +46,7 @@ pub struct ClientError {
     exit_code: ExitCode,
     message: Message,
     program_line: Option<String>,
+    completed: Option<Box<ClientSummary>>,
 }
 
 impl ClientError {
@@ -54,6 +56,7 @@ impl ClientError {
             exit_code,
             message,
             program_line: None,
+            completed: None,
         }
     }
 
@@ -91,6 +94,26 @@ impl ClientError {
     /// name so the line carries the same brand as the trailer.
     pub fn program_line(&self) -> Option<&str> {
         self.program_line.as_deref()
+    }
+
+    /// Attaches the summary of a transfer that went on to its end before
+    /// failing with this error, recording the exit code it owes.
+    #[must_use]
+    pub(crate) fn with_completed_summary(mut self, mut summary: ClientSummary) -> Self {
+        summary.set_io_error_exit_code(self.exit_code());
+        self.completed = Some(Box::new(summary));
+        self
+    }
+
+    /// Takes the summary of a transfer that went on to its end before failing
+    /// with this error. The failed entries were printed as they happened, so
+    /// the caller prints this summary as for a successful run and finishes
+    /// with the exit code it carries ([`ClientSummary::io_error_exit_code`]).
+    ///
+    /// upstream: main.c:1338 - `report()` prints the totals, then
+    /// `exit_cleanup()` names the exit code.
+    pub fn take_completed_summary(&mut self) -> Option<ClientSummary> {
+        self.completed.take().map(|summary| *summary)
     }
 }
 
@@ -252,6 +275,9 @@ pub(crate) fn remote_exit_error(exit_code: ExitCode, role: Role) -> ClientError 
 #[cold]
 pub(crate) fn map_local_copy_error(error: LocalCopyError) -> ClientError {
     let exit_code_i32 = error.exit_code();
+    if error.is_reported() {
+        return reported_entry_error(exit_code_i32);
+    }
     match error.into_kind() {
         LocalCopyErrorKind::MissingSourceOperands => missing_operands_error(),
         LocalCopyErrorKind::InvalidArgument(reason) => {
@@ -334,6 +360,27 @@ pub(crate) fn map_local_copy_error(error: LocalCopyError) -> ClientError {
         }
         LocalCopyErrorKind::Interrupted => signal_interrupt_error(Role::Sender),
     }
+}
+
+/// Builds the closing diagnostic of a local copy whose failed entries were
+/// already printed as they happened: only the exit code is left to name.
+///
+/// upstream: log.c:98-99 - `some files/attrs were not transferred (see
+/// previous errors)` for RERR_PARTIAL and `some files vanished before they
+/// could be transferred` for RERR_VANISHED, printed by the sending half.
+#[cold]
+fn reported_entry_error(exit_code: i32) -> ClientError {
+    let code = ExitCode::from_i32(exit_code).unwrap_or(ExitCode::PartialTransfer);
+    let message = Message::from_exit_code(code.as_i32())
+        .map(|message| message.with_source(crate::tracked_message_source!()))
+        .unwrap_or_else(|| {
+            rsync_error!(
+                code.as_i32(),
+                "some files/attrs were not transferred (see previous errors)"
+            )
+        })
+        .with_role(Role::Sender);
+    ClientError::with_code(code, message)
 }
 
 /// Builds the single signal-abort diagnostic emitted when a transfer is

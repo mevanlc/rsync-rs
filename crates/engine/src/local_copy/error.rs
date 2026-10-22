@@ -1,13 +1,16 @@
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use thiserror::Error;
 
+use super::context::CopyOutcome;
 use super::filter_program::{
     INVALID_OPERAND_EXIT_CODE, MAX_DELETE_EXIT_CODE, MISSING_OPERANDS_EXIT_CODE, SIGNAL_EXIT_CODE,
     TIMEOUT_EXIT_CODE, VANISHED_EXIT_CODE,
 };
+use super::plan::{LocalCopyReport, LocalCopySummary};
 
 /// Formats an [`io::Error`] the way upstream rsync's `rsyserr()` does:
 /// `"<strerror> (<errno>)"` (upstream `log.c:500` `": %s (%d)"`), rather than
@@ -52,16 +55,50 @@ pub fn upstream_io_error(error: &io::Error) -> String {
 /// | 24        | RERR_VANISHED | `Vanished`                |
 /// | 25        | RERR_DEL_LIMIT| `DeleteLimit`             |
 /// | 30        | RERR_TIMEOUT  | `Timeout`                 |
-#[derive(Debug, Error)]
-#[error(transparent)]
 pub struct LocalCopyError {
-    #[from]
     kind: LocalCopyErrorKind,
+    /// Set once the failure has been printed at the entry it happened on, so
+    /// the directory frames it unwinds through do not print it again.
+    reported: bool,
+    /// The outcome of a run that went on to its end after this error.
+    completed: Option<Box<CopyOutcome>>,
+}
+
+impl fmt::Debug for LocalCopyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalCopyError")
+            .field("kind", &self.kind)
+            .field("reported", &self.reported)
+            .field("completed", &self.completed.is_some())
+            .finish()
+    }
+}
+
+impl fmt::Display for LocalCopyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.kind, f)
+    }
+}
+
+impl std::error::Error for LocalCopyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.kind.source()
+    }
+}
+
+impl From<LocalCopyErrorKind> for LocalCopyError {
+    fn from(kind: LocalCopyErrorKind) -> Self {
+        Self::new(kind)
+    }
 }
 
 impl LocalCopyError {
     const fn new(kind: LocalCopyErrorKind) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            reported: false,
+            completed: None,
+        }
     }
 
     /// Constructs an error representing missing operands.
@@ -293,6 +330,42 @@ impl LocalCopyError {
     #[must_use]
     pub const fn is_change_dir_failed(&self) -> bool {
         matches!(self.kind, LocalCopyErrorKind::ChangeDirFailed { .. })
+    }
+
+    /// Marks the error as printed at the entry it happened on.
+    #[must_use]
+    pub(crate) fn into_reported(mut self) -> Self {
+        self.reported = true;
+        self
+    }
+
+    /// Reports whether this error was printed when its entry failed, leaving
+    /// the caller only the closing exit-code line to print.
+    ///
+    /// upstream: log.c:337-338 - `rsyserr(FERROR_XFER, ...)` prints the
+    /// failure and sets `got_xfer_error`; `log_exit()` later names only the
+    /// exit code (`some files/attrs were not transferred (see previous
+    /// errors)`).
+    #[must_use]
+    pub const fn is_reported(&self) -> bool {
+        self.reported
+    }
+
+    /// Attaches the outcome of a run that went on to its end after this error.
+    #[must_use]
+    pub(crate) fn with_completed_run(mut self, outcome: CopyOutcome) -> Self {
+        self.completed = Some(Box::new(outcome));
+        self
+    }
+
+    /// Takes the summary and report of a run that went on to its end after
+    /// this error, so the caller can still print the transfer listing and
+    /// totals ahead of the exit-code line, as upstream does. The report holds
+    /// records only when the run collected them.
+    pub fn take_completed_run(&mut self) -> Option<(LocalCopySummary, LocalCopyReport)> {
+        self.completed
+            .take()
+            .map(|outcome| outcome.into_summary_and_report())
     }
 
     /// Provides access to the underlying error kind.

@@ -250,6 +250,14 @@ pub trait LocalCopyRecordHandler {
     fn should_stop(&self) -> bool {
         false
     }
+
+    /// Reports whether entries that fail are printed as they happen.
+    ///
+    /// A preview pass that the real copy repeats answers `false`, so each
+    /// failure is printed once, by the copy that acts on it.
+    fn reports_failures(&self) -> bool {
+        true
+    }
 }
 
 impl<F> LocalCopyRecordHandler for F

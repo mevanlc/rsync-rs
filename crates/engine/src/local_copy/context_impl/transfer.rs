@@ -710,6 +710,14 @@ impl<'a> CopyContext<'a> {
         self.observer.is_some()
     }
 
+    /// Reports whether entries that fail are printed as they happen, which a
+    /// preview observer turns off.
+    pub(in crate::local_copy) fn reports_entry_failures(&self) -> bool {
+        self.observer
+            .as_ref()
+            .is_none_or(|observer| observer.reports_failures())
+    }
+
     /// Tells the observer the walk found `entries` file-list entries holding
     /// `bytes` of regular-file data that it will process later.
     pub(super) fn notify_file_list_growth(&mut self, entries: usize, bytes: u64) {

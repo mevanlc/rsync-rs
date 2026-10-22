@@ -20,6 +20,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::super::create_failure::full_fname;
+use super::super::{report_entry_failure, retain_entry_failure};
 use crate::local_copy::overrides::device_identifier;
 use crate::local_copy::{
     CopyContext, CreatedEntryKind, DeleteTiming, LocalCopyAction, LocalCopyChangeSet,
@@ -261,7 +262,9 @@ fn copy_directory_recursive_inner(
     let mut entries = match scan {
         Ok(entries) => entries,
         Err(error) => {
-            if error.is_vanished_error() {
+            if !context.reports_entry_failures() {
+                // A preview pass; the copy that repeats it prints the failure.
+            } else if error.is_vanished_error() {
                 eprintln!("directory has vanished: {}", full_fname(source));
             } else {
                 let detail = match error.kind() {
@@ -281,7 +284,7 @@ fn copy_directory_recursive_inner(
                 eprintln!("rsync: [sender] opendir {name} failed: {detail}");
             }
             context.record_io_error();
-            first_entry_io_error = Some(error);
+            first_entry_io_error = Some(error.into_reported());
             enumeration_failed = true;
             Vec::new()
         }
@@ -709,24 +712,17 @@ fn copy_directory_recursive_inner(
                     kept_any = true;
                 }
             }
-            Err(error) if error.is_vanished_error() => {
-                // upstream: flist.c:1688 / sender.c:715 - vanished files produce
-                // a warning and set IOERR_VANISHED (exit code 24).
-                // full_fname() wraps the path in double quotes (util1.c:1528).
-                eprintln!("file has vanished: \"{}\"", planned.entry.path.display());
-                context.record_io_error();
-                if first_entry_io_error.is_none() {
-                    first_entry_io_error = Some(error);
-                }
-            }
             Err(error) if error.is_io_error() => {
                 // upstream: rsync continues transferring remaining entries when
                 // individual files fail with I/O errors (permission denied, etc.),
-                // regardless of whether --delete is active.
+                // regardless of whether --delete is active. Each failure is
+                // printed as it happens; a vanished file (flist.c:1688 /
+                // sender.c:715) sets IOERR_VANISHED (exit code 24), any other
+                // IOERR_GENERAL (23). A child directory's failure arrives here
+                // already printed.
+                let error = report_entry_failure(context, error, &planned.entry.path);
                 context.record_io_error();
-                if first_entry_io_error.is_none() {
-                    first_entry_io_error = Some(error);
-                }
+                retain_entry_failure(&mut first_entry_io_error, error);
             }
             Err(error) if error.is_delete_limit_error() => {
                 // upstream: cleanup.c:213-214 - a --max-delete limit hit while

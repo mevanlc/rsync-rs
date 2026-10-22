@@ -268,6 +268,16 @@ where
             .map(|observer| observer as &mut dyn ClientProgressObserver);
         run_client_with_observer(config, observer)
     };
+    // upstream: main.c:1338 - a transfer that went on past failed entries
+    // prints its listing and totals like any other before log_exit() names the
+    // exit code, so the error it owes becomes the trailer below.
+    let (result, owed) = match result {
+        Err(mut error) => match error.take_completed_summary() {
+            Some(summary) => (Ok(summary), Some(error)),
+            None => (Err(error), None),
+        },
+        Ok(summary) => (Ok(summary), None),
+    };
 
     match result {
         Ok(summary) => {
@@ -387,7 +397,14 @@ where
             // propagates back to `run`'s tail then finds the latch already set
             // and cannot substitute RERR_SIGNAL.
             let code = summary.io_error_exit_code().unwrap_or(0);
-            if code != 0 {
+            if let Some(error) = owed {
+                let fallback = error
+                    .message()
+                    .clone()
+                    .with_brand(stderr.brand())
+                    .to_string();
+                emit_message_with_fallback(error.message(), &fallback, stderr);
+            } else if code != 0 {
                 emit_exit_diagnostic(code, is_sender, stderr);
             }
             core::exit_code::record_exit(core::exit_code::process_latch(), code)
