@@ -163,6 +163,8 @@ pub(crate) struct CopyContext<'a> {
     /// matching upstream, which is why the manual recommends `--delete-after`.
     delete_filter_chain: RefCell<Vec<(usize, DirectoryFilterGuard)>>,
     observer: Option<&'a mut dyn LocalCopyRecordHandler>,
+    /// Whether the observer has been told the record stream started.
+    observer_started: bool,
     deferred_ops: DeferredOperationQueue,
     timeout: Option<Duration>,
     stop_deadline: Option<Instant>,

@@ -347,16 +347,19 @@ impl<'a> LiveProgress<'a> {
         }
     }
 
-    /// Flushes the writer after a progress tick if the outbuf mode requires it.
+    /// Flushes the writer after a progress tick unless block buffering was
+    /// requested.
     ///
     /// upstream: progress.c:133 calls `rflush(FCLIENT)` after every non-final
-    /// progress tick. We mirror this for unbuffered and line-buffered modes.
-    /// Block-buffered mode defers flushing to the OS or explicit flush calls.
+    /// progress tick. We mirror this by default and for unbuffered and
+    /// line-buffered modes: a progress line ends in `\r`, not `\n`, so a
+    /// line-buffered stdout would otherwise hold it back until the next named
+    /// entry. An explicit `--outbuf=B` defers flushing to the OS or explicit
+    /// flush calls.
     fn flush_if_needed(&mut self) -> io::Result<()> {
         match self.output_config.outbuf_mode {
-            Some(OutbufMode::None) => self.writer.flush(),
-            Some(OutbufMode::Line) => self.writer.flush(),
-            Some(OutbufMode::Block) | None => Ok(()),
+            Some(OutbufMode::None | OutbufMode::Line) | None => self.writer.flush(),
+            Some(OutbufMode::Block) => Ok(()),
         }
     }
 

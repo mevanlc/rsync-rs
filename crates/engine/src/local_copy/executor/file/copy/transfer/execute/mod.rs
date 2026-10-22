@@ -630,6 +630,30 @@ pub(in crate::local_copy) fn execute_transfer_once(
         &mut direct_buffer
     };
 
+    // Name the file to the observer before its data moves, so a progress block
+    // the copy loop below opens can follow the file's own line. The record is
+    // the one a dry run reports for this file (`wrote_data` whenever bytes
+    // remain to copy), which is what upstream itemizes before the transfer.
+    if context.has_observer() {
+        let record = transfer_record(
+            context,
+            source,
+            destination,
+            metadata,
+            &metadata_options,
+            record_path,
+            existing_metadata,
+            destination_previously_existed,
+            device_as_file_size,
+            reference_basis.as_deref(),
+            flags,
+            0,
+            Duration::default(),
+            copy_bytes_remaining > 0,
+        )?;
+        context.notify_transfer_start(&record);
+    }
+
     let start = Instant::now();
 
     // When a backup RENAME moved the basis file (non-inplace --backup) or a
@@ -810,84 +834,23 @@ pub(in crate::local_copy) fn execute_transfer_once(
             .record_touched_blocks(outcome.touched_blocks());
     }
 
-    let mut metadata_snapshot = LocalCopyMetadata::from_metadata(metadata, None)
-        .virtualize_fake_super(source, metadata_options.fake_super_enabled());
-    if let Some(size) = device_as_file_size {
-        metadata_snapshot = metadata_snapshot.virtualize_copy_device_as_file(size);
-    }
-    let total_bytes = Some(metadata_snapshot.len());
-    let wrote_data = outcome.literal_bytes() > 0 || append_offset > 0;
-
-    // upstream: generator.c:1178 try_dests_reg() - a `--copy-dest` reconstruction
-    // itemizes the attribute columns against the alternate basis (`sxp->st`), not the
-    // (absent) prior destination, and never sets ITEM_IS_NEW. Comparing source
-    // against the basis with `destination_previously_existed = true` keeps the
-    // size/time/perm slots blank when the source already matched the basis.
-    let basis_metadata = match reference_basis.as_deref() {
-        Some(path) => match fs::symlink_metadata(path) {
-            Ok(meta) => Some(meta),
-            Err(error) => {
-                return Err(LocalCopyError::io(
-                    "inspect reference basis",
-                    path.to_path_buf(),
-                    error,
-                ));
-            }
-        },
-        None => None,
-    };
-    let is_reference_copy = basis_metadata.is_some();
-    let change_set = LocalCopyChangeSet::for_file_with_checksum(
+    let record = transfer_record(
+        context,
+        source,
+        destination,
         metadata,
-        if is_reference_copy {
-            basis_metadata.as_ref()
-        } else {
-            existing_metadata
-        },
         &metadata_options,
-        is_reference_copy || destination_previously_existed,
-        wrote_data && !is_reference_copy,
-        flags.xattrs_changed,
-        flags.acls_enabled(),
-        flags.checksum_enabled,
-        context.options().modify_window(),
-    );
-    // upstream: generator.c itemizes a recreated --fake-super device with
-    // ITEM_REPORT_CHANGE ('c') when its %stat rdev/type differs from the
-    // destination's, even though the placeholder bytes are identical. The node
-    // is recreated, so ITEM_REPORT_TIME is set too - rendered 'T' when times
-    // are not preserved (the mtime is reset to the transfer time).
-    #[cfg(all(unix, feature = "xattr"))]
-    let change_set = if metadata_options.fake_super_enabled()
-        && destination_previously_existed
-        && super::super::super::comparison::fake_super_stat_differs(source, destination)
-    {
-        let change_set = change_set.with_checksum_changed(true);
-        if metadata_options.times() {
-            change_set
-        } else {
-            change_set.with_time_change(Some(crate::local_copy::TimeChange::TransferTime))
-        }
-    } else {
-        change_set
-    };
-    let action = if is_reference_copy {
-        LocalCopyAction::ReferenceCopied
-    } else {
-        LocalCopyAction::DataCopied
-    };
-    context.record(
-        LocalCopyRecord::new(
-            record_path.to_path_buf(),
-            action,
-            outcome.literal_bytes(),
-            total_bytes,
-            elapsed,
-            Some(metadata_snapshot),
-        )
-        .with_change_set(change_set)
-        .with_creation(!is_reference_copy && !destination_previously_existed),
-    );
+        record_path,
+        existing_metadata,
+        destination_previously_existed,
+        device_as_file_size,
+        reference_basis.as_deref(),
+        flags,
+        outcome.literal_bytes(),
+        elapsed,
+        outcome.literal_bytes() > 0 || append_offset > 0,
+    )?;
+    context.record(record);
 
     if let Err(timeout_error) = context.enforce_timeout() {
         drop(writer_for_metadata.take());
@@ -928,6 +891,108 @@ pub(in crate::local_copy) fn execute_transfer_once(
     } else {
         TransferOutcome::Complete
     })
+}
+
+/// Builds the record a regular-file transfer of `record_path` reports.
+///
+/// `literal_bytes`, `elapsed` and `wrote_data` describe the data the transfer
+/// moved; the rest is fixed before it starts, so the same call also yields the
+/// record [`execute_transfer_once`] announces ahead of the copy.
+#[allow(clippy::too_many_arguments)]
+fn transfer_record(
+    context: &CopyContext,
+    source: &Path,
+    destination: &Path,
+    metadata: &fs::Metadata,
+    metadata_options: &MetadataOptions,
+    record_path: &Path,
+    existing_metadata: Option<&fs::Metadata>,
+    destination_previously_existed: bool,
+    device_as_file_size: Option<u64>,
+    reference_basis: Option<&Path>,
+    flags: TransferFlags,
+    literal_bytes: u64,
+    elapsed: Duration,
+    wrote_data: bool,
+) -> Result<LocalCopyRecord, LocalCopyError> {
+    #[cfg(not(all(unix, feature = "xattr")))]
+    let _ = destination;
+
+    let mut metadata_snapshot = LocalCopyMetadata::from_metadata(metadata, None)
+        .virtualize_fake_super(source, metadata_options.fake_super_enabled());
+    if let Some(size) = device_as_file_size {
+        metadata_snapshot = metadata_snapshot.virtualize_copy_device_as_file(size);
+    }
+    let total_bytes = Some(metadata_snapshot.len());
+
+    // upstream: generator.c:1178 try_dests_reg() - a `--copy-dest` reconstruction
+    // itemizes the attribute columns against the alternate basis (`sxp->st`), not the
+    // (absent) prior destination, and never sets ITEM_IS_NEW. Comparing source
+    // against the basis with `destination_previously_existed = true` keeps the
+    // size/time/perm slots blank when the source already matched the basis.
+    let basis_metadata = match reference_basis {
+        Some(path) => match fs::symlink_metadata(path) {
+            Ok(meta) => Some(meta),
+            Err(error) => {
+                return Err(LocalCopyError::io(
+                    "inspect reference basis",
+                    path.to_path_buf(),
+                    error,
+                ));
+            }
+        },
+        None => None,
+    };
+    let is_reference_copy = basis_metadata.is_some();
+    let change_set = LocalCopyChangeSet::for_file_with_checksum(
+        metadata,
+        if is_reference_copy {
+            basis_metadata.as_ref()
+        } else {
+            existing_metadata
+        },
+        metadata_options,
+        is_reference_copy || destination_previously_existed,
+        wrote_data && !is_reference_copy,
+        flags.xattrs_changed,
+        flags.acls_enabled(),
+        flags.checksum_enabled,
+        context.options().modify_window(),
+    );
+    // upstream: generator.c itemizes a recreated --fake-super device with
+    // ITEM_REPORT_CHANGE ('c') when its %stat rdev/type differs from the
+    // destination's, even though the placeholder bytes are identical. The node
+    // is recreated, so ITEM_REPORT_TIME is set too - rendered 'T' when times
+    // are not preserved (the mtime is reset to the transfer time).
+    #[cfg(all(unix, feature = "xattr"))]
+    let change_set = if metadata_options.fake_super_enabled()
+        && destination_previously_existed
+        && super::super::super::comparison::fake_super_stat_differs(source, destination)
+    {
+        let change_set = change_set.with_checksum_changed(true);
+        if metadata_options.times() {
+            change_set
+        } else {
+            change_set.with_time_change(Some(crate::local_copy::TimeChange::TransferTime))
+        }
+    } else {
+        change_set
+    };
+    let action = if is_reference_copy {
+        LocalCopyAction::ReferenceCopied
+    } else {
+        LocalCopyAction::DataCopied
+    };
+    Ok(LocalCopyRecord::new(
+        record_path.to_path_buf(),
+        action,
+        literal_bytes,
+        total_bytes,
+        elapsed,
+        Some(metadata_snapshot),
+    )
+    .with_change_set(change_set)
+    .with_creation(!is_reference_copy && !destination_previously_existed))
 }
 
 /// Finds a fuzzy delta basis for `destination` when the exact destination is

@@ -694,10 +694,38 @@ impl<'a> CopyContext<'a> {
             }
         }
         if let Some(observer) = &mut self.observer {
+            if !self.observer_started {
+                self.observer_started = true;
+                observer.handle_start(self.summary.destination_root_created());
+            }
             observer.handle(record.clone());
         }
         if let Some(events) = &mut self.events {
             events.push(record);
+        }
+    }
+
+    /// Reports whether an observer is registered for this copy.
+    pub(super) const fn has_observer(&self) -> bool {
+        self.observer.is_some()
+    }
+
+    /// Tells the observer the walk found `entries` file-list entries holding
+    /// `bytes` of regular-file data that it will process later.
+    pub(super) fn notify_file_list_growth(&mut self, entries: usize, bytes: u64) {
+        if entries == 0 {
+            return;
+        }
+        if let Some(observer) = &mut self.observer {
+            observer.handle_file_list_growth(entries, bytes);
+        }
+    }
+
+    /// Hands the observer the record a regular-file transfer is about to
+    /// produce, before any of its data moves.
+    pub(super) fn notify_transfer_start(&mut self, record: &LocalCopyRecord) {
+        if let Some(observer) = &mut self.observer {
+            observer.handle_transfer_start(record);
         }
     }
 

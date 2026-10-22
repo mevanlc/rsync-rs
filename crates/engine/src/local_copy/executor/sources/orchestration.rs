@@ -1108,6 +1108,12 @@ fn process_single_source(
     }
 
     context.record_file_list_entry(record_relative.as_deref());
+    let operand_bytes = if file_type.is_file() {
+        metadata.len()
+    } else {
+        0
+    };
+    context.notify_file_list_growth(1, operand_bytes);
 
     if proc_ctx.requires_directory_destination() && !destination_behaves_like_directory {
         return Err(LocalCopyError::invalid_argument(

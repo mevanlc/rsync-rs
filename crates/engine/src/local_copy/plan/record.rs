@@ -219,6 +219,37 @@ pub trait LocalCopyRecordHandler {
 
     /// Handles an in-flight progress update for the current action.
     fn handle_progress(&mut self, _progress: LocalCopyProgress<'_>) {}
+
+    /// Handles the start of the record stream, once, ahead of the first
+    /// record.
+    ///
+    /// `destination_root_created` reports whether the copy created the
+    /// destination root, which is settled before any entry is recorded.
+    fn handle_start(&mut self, _destination_root_created: bool) {}
+
+    /// Handles `entries` file-list entries, holding `bytes` of regular-file
+    /// data, that the walk has just found and will process later.
+    ///
+    /// A directory reports its children when it is read, before the first of
+    /// them is processed, the way upstream's INC_RECURSE sender appends a
+    /// directory's sub-list to the file list (flist.c:send_extra_file_list()).
+    fn handle_file_list_growth(&mut self, _entries: usize, _bytes: u64) {}
+
+    /// Handles a regular file whose data is about to move, carrying the
+    /// record its completion is expected to produce.
+    ///
+    /// Lets an observer name the file before the first
+    /// [`handle_progress`](Self::handle_progress) update for it arrives.
+    fn handle_transfer_start(&mut self, _record: &LocalCopyRecord) {}
+
+    /// Reports whether the copy should stop at its next checkpoint.
+    ///
+    /// A `true` answer makes the copy fail with
+    /// [`LocalCopyError::interrupted`](crate::local_copy::LocalCopyError::interrupted)
+    /// at the next point it checks its deadlines.
+    fn should_stop(&self) -> bool {
+        false
+    }
 }
 
 impl<F> LocalCopyRecordHandler for F

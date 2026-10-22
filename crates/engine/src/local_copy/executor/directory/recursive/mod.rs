@@ -39,7 +39,8 @@ use dir_metadata::{
 use entry::process_planned_entry;
 
 use super::planner::{
-    apply_pre_transfer_deletions, plan_directory_entries, reorder_hardlink_group_holders,
+    EntryAction, apply_pre_transfer_deletions, plan_directory_entries,
+    reorder_hardlink_group_holders,
 };
 use super::support::read_directory_entries_sorted_reuse;
 
@@ -611,6 +612,31 @@ fn copy_directory_recursive_inner(
     }
 
     let mut plan = plan_directory_entries(context, &entries, relative, root_device)?;
+    // upstream: flist.c:send_extra_file_list() - an INC_RECURSE sender appends a
+    // directory's children to the file list as one sub-list once it reads the
+    // directory, ahead of the receiver reaching them. Report the same batch.
+    if context.has_observer() {
+        let (entries, bytes) = plan
+            .planned_entries
+            .iter()
+            .filter(|planned| {
+                !matches!(
+                    planned.action,
+                    EntryAction::SkipExcluded
+                        | EntryAction::SkipNonRegular
+                        | EntryAction::SkipMountPoint
+                )
+            })
+            .fold((0usize, 0u64), |(entries, bytes), planned| {
+                let size = if matches!(planned.action, EntryAction::CopyFile) {
+                    planned.metadata().len()
+                } else {
+                    0
+                };
+                (entries + 1, bytes.saturating_add(size))
+            });
+        context.notify_file_list_growth(entries, bytes);
+    }
     // upstream: hlink.c:match_gnums / generator.c:2214-2215 - the last name-sorted
     // member of a hard-link cohort is the transferred data-holder; earlier members
     // follow it as `hf ... => <holder>` aliases. Reorder the plan so the executor's

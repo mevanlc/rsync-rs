@@ -565,8 +565,21 @@ fn run_client_internal(
         options = options.collect_events(true);
     }
 
+    // upstream: compat.c:721-723 - a local copy's receiver grants INC_RECURSE
+    // only at protocol >= 30 and when set_allow_inc_recurse() leaves it
+    // allowed. Without it the file list is built whole before the transfer, so
+    // the progress preview may walk all of it; with it the copy streams once
+    // its tree outgrows the sender's lookahead. A batch capture always gets
+    // the whole preview, so it never stops part way through a recording.
+    let incremental = config.allow_inc_recurse(false)
+        && config
+            .protocol_version()
+            .is_none_or(|protocol| protocol.supports_inc_recurse())
+        && options.get_batch_writer().is_none();
     let mut handler_adapter = observer
-        .map(|observer| ClientProgressForwarder::new(observer, &plan, mode, options.clone()))
+        .map(|observer| {
+            ClientProgressForwarder::new(observer, &plan, mode, options.clone(), incremental)
+        })
         .transpose()?;
     if let Some(adapter) = handler_adapter.as_mut() {
         adapter.start();
@@ -611,7 +624,7 @@ fn run_client_internal(
     // line when the transfer moved no file data (a lone special/symlink or a
     // no-change run), which the per-file path never produces.
     if let Some(adapter) = handler_adapter.as_mut() {
-        adapter.finalize();
+        adapter.finalize(summary.total_source_bytes());
     }
 
     // A local copy has no protocol stream to tee, so the synthesized batch has

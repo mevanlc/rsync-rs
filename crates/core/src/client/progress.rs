@@ -240,15 +240,57 @@ where
     }
 }
 
+/// Most records the up-front preview of an incremental local copy produces
+/// before the copy stops previewing and streams instead.
+///
+/// upstream: rsync.h:151 `MIN_FILECNT_LOOKAHEAD` - an INC_RECURSE sender keeps
+/// at least this many entries queued ahead of the receiver (sender.c:516,550),
+/// so a tree that fits the window is wholly listed before the first transfer
+/// (`to-chk` against the full total), while a larger one is checked against a
+/// total that grows as later sub-lists arrive (`ir-chk`).
+const PREVIEW_RECORD_LIMIT: usize = 1000;
+
+/// Counts the records of a bounded preview and stops it past its limit.
+struct PreviewLimit {
+    records: usize,
+    destination_root_created: bool,
+}
+
+impl PreviewLimit {
+    const fn new() -> Self {
+        Self {
+            records: 0,
+            destination_root_created: false,
+        }
+    }
+}
+
+impl LocalCopyRecordHandler for PreviewLimit {
+    fn handle(&mut self, _record: LocalCopyRecord) {
+        self.records = self.records.saturating_add(1);
+    }
+
+    fn handle_start(&mut self, destination_root_created: bool) {
+        self.destination_root_created = destination_root_created;
+    }
+
+    fn should_stop(&self) -> bool {
+        self.records > PREVIEW_RECORD_LIMIT
+    }
+}
+
 pub(crate) struct ClientProgressForwarder<'a> {
     observer: &'a mut dyn ClientProgressObserver,
     // Total file-list entries (the `to-chk=<remaining>/<total>` denominator),
     // including up-to-date ones the generator checks but never transfers.
+    // While the list is still growing this is the count the walk has found so
+    // far.
     total: usize,
     // Number of entries that will actually be transferred. The `to-chk`
     // remaining counts down from this, so the last transferred entry reaches 0
     // even when up-to-date entries (e.g. an unchanged parent dir the local
-    // executor visits last) trail it in processing order.
+    // executor visits last) trail it in processing order. Unknown, and so
+    // `usize::MAX`, while the list is still growing.
     transferred_total: usize,
     // Running count of entries transferred. Drives `xfr#`; only advances for
     // real regular-file transfers, never for directories, symlinks, devices,
@@ -277,20 +319,32 @@ pub(crate) struct ClientProgressForwarder<'a> {
     // progress block. upstream: sender.c:639-643 - under `!do_xfers` the
     // sender logs the item, counts it, and skips the transfer.
     dry_run: bool,
-    // The preview's record of each file that will transfer, so a file whose
-    // first sign of life is an in-flight tick is announced with its full
-    // record before its progress block opens.
+    // The record of each file that will transfer, so a file whose first sign
+    // of life is an in-flight tick is announced with its full record before
+    // its progress block opens. Filled by the preview, or while the list is
+    // still growing, by the copy itself as each transfer starts.
     pending_transfers: HashMap<PathBuf, ClientEvent>,
     // The in-flight file already announced from `pending_transfers`.
     announced: Option<PathBuf>,
+    // Whether the file list is complete. upstream: progress.c:80 `flist_eof`
+    // picks `to-chk` over `ir-chk`. False while an incremental copy too large
+    // to preview streams, its totals growing as the walk reads directories.
+    flist_eof: bool,
 }
 
 impl<'a> ClientProgressForwarder<'a> {
+    /// Previews the copy as a dry run to learn its totals before it starts.
+    ///
+    /// An `incremental` copy previews at most [`PREVIEW_RECORD_LIMIT`]
+    /// records: past that, the preview stops and the copy streams, learning
+    /// its totals as it goes, instead of walking the whole tree twice.
+    /// upstream builds its whole file list up front only without INC_RECURSE.
     pub(crate) fn new(
         observer: &'a mut dyn ClientProgressObserver,
         plan: &LocalCopyPlan,
         mode: LocalCopyExecution,
         mut options: LocalCopyOptions,
+        incremental: bool,
     ) -> Result<Self, ClientError> {
         if !options.events_enabled() {
             options = options.collect_events(true);
@@ -298,10 +352,30 @@ impl<'a> ClientProgressForwarder<'a> {
 
         // upstream makes no preview pass, so its notices (e.g. `skipping
         // directory`) must not repeat the real run's.
-        let preview_report = logging::discard_events_from(|| {
-            plan.execute_with_report(LocalCopyExecution::DryRun, options)
-        })
-        .map_err(map_local_copy_error)?;
+        let mut limit = PreviewLimit::new();
+        let preview = logging::discard_events_from(|| {
+            if incremental {
+                plan.execute_with_report_and_handler(
+                    LocalCopyExecution::DryRun,
+                    options,
+                    Some(&mut limit),
+                )
+            } else {
+                plan.execute_with_report(LocalCopyExecution::DryRun, options)
+            }
+        });
+        let preview_report = match preview {
+            Ok(report) => report,
+            Err(_) if limit.should_stop() => {
+                return Ok(Self::streaming(
+                    observer,
+                    plan,
+                    mode,
+                    limit.destination_root_created,
+                ));
+            }
+            Err(error) => return Err(map_local_copy_error(error)),
+        };
 
         let (summary, records, destination_root) = preview_report.into_parts();
         let destination_root: Arc<Path> = Arc::from(destination_root);
@@ -347,7 +421,34 @@ impl<'a> ClientProgressForwarder<'a> {
             dry_run,
             pending_transfers,
             announced: None,
+            flist_eof: true,
         })
+    }
+
+    /// Builds a forwarder whose file list grows as the copy walks the tree.
+    fn streaming(
+        observer: &'a mut dyn ClientProgressObserver,
+        plan: &LocalCopyPlan,
+        mode: LocalCopyExecution,
+        destination_root_created: bool,
+    ) -> Self {
+        Self {
+            observer,
+            total: 0,
+            transferred_total: usize::MAX,
+            transferred: 0,
+            checked: 0,
+            overall_total_bytes: None,
+            overall_transferred: 0,
+            overall_start: Instant::now(),
+            in_flight: HashMap::new(),
+            destination_root: Arc::from(plan.destination()),
+            destination_root_created,
+            dry_run: matches!(mode, LocalCopyExecution::DryRun),
+            pending_transfers: HashMap::new(),
+            announced: None,
+            flist_eof: false,
+        }
     }
 
     /// Tells the observer the copy is starting, before any entry is processed.
@@ -375,8 +476,21 @@ impl<'a> ClientProgressForwarder<'a> {
     /// `transfer_complete`; per-file progress rendering ignores it because
     /// upstream has no terminal summary outside progress2. A dry run always
     /// takes this path: it counts its transfers but prints no block for them.
-    pub(crate) fn finalize(&mut self) {
-        if self.total == 0 || (self.transferred > 0 && !self.dry_run) {
+    ///
+    /// A copy whose file list grew as it streamed takes it too: its last
+    /// transfer was checked against a list still in flight (`ir-chk`), so the
+    /// final line is what reports the completed list, sized from the copy's
+    /// own `total_source_bytes`. upstream prints that line at the end of
+    /// every run (receiver.c:852-857).
+    pub(crate) fn finalize(&mut self, total_source_bytes: u64) {
+        if !self.flist_eof {
+            self.flist_eof = true;
+            self.total = self.total.max(self.checked);
+            self.overall_total_bytes = Some(total_source_bytes);
+        } else if self.transferred > 0 && !self.dry_run {
+            return;
+        }
+        if self.total == 0 {
             return;
         }
 
@@ -429,6 +543,11 @@ impl<'a> LocalCopyRecordHandler for ClientProgressForwarder<'a> {
         // entry advances the file index, so `to-chk` counts down over
         // directories and symlinks too, even though they print nothing.
         self.checked = self.checked.saturating_add(1);
+        // A growing list can trail the walk by entries it reports late (the
+        // transfer root, `--relative` implied directories); never count past it.
+        if !self.flist_eof {
+            self.total = self.total.max(self.checked);
+        }
 
         // upstream: receiver.c:918-976 - only ITEM_TRANSFER (regular file data)
         // entries print a per-file block and bump `xfr#`. Directories, symlinks,
@@ -472,13 +591,34 @@ impl<'a> LocalCopyRecordHandler for ClientProgressForwarder<'a> {
             overall_transferred: self.overall_transferred,
             overall_total_bytes: self.overall_total_bytes,
             overall_elapsed: self.overall_start.elapsed(),
-            // Local copies enumerate the file list eagerly before transferring,
-            // so the list is always complete when progress is emitted.
-            flist_eof: true,
+            flist_eof: self.flist_eof,
             transfer_complete: false,
         };
 
         self.observer.on_progress(&update);
+    }
+
+    fn handle_file_list_growth(&mut self, entries: usize, bytes: u64) {
+        if self.flist_eof {
+            return;
+        }
+        self.total = self.total.saturating_add(entries);
+        let total_bytes = self.overall_total_bytes.unwrap_or(0).saturating_add(bytes);
+        self.overall_total_bytes = (total_bytes > 0).then_some(total_bytes);
+    }
+
+    fn handle_transfer_start(&mut self, record: &LocalCopyRecord) {
+        // A preview already supplied every transfer's record, and a dry run
+        // opens no progress block to announce.
+        if self.flist_eof || self.dry_run {
+            return;
+        }
+        // The copy moves one file at a time, so only this one can be pending.
+        self.pending_transfers.clear();
+        let event =
+            ClientEvent::from_record_owned(record.clone(), Arc::clone(&self.destination_root));
+        self.pending_transfers
+            .insert(event.relative_path().to_path_buf(), event);
     }
 
     fn handle_progress(&mut self, progress: LocalCopyProgress<'_>) {
@@ -527,9 +667,7 @@ impl<'a> LocalCopyRecordHandler for ClientProgressForwarder<'a> {
             overall_transferred: self.overall_transferred,
             overall_total_bytes: self.overall_total_bytes,
             overall_elapsed: self.overall_start.elapsed(),
-            // Local copies do not use INC_RECURSE: the file list is enumerated
-            // eagerly before any progress event is emitted.
-            flist_eof: true,
+            flist_eof: self.flist_eof,
             transfer_complete: false,
         };
 

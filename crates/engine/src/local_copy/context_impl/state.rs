@@ -51,6 +51,7 @@ impl<'a> CopyContext<'a> {
             delete_filter_chain: RefCell::new(Vec::new()),
             filter_program,
             observer,
+            observer_started: false,
             deferred_ops: DeferredOperationQueue::default(),
             timeout,
             stop_deadline,
@@ -120,9 +121,16 @@ impl<'a> CopyContext<'a> {
         self.last_progress = Instant::now();
     }
 
-    /// Returns an error if the inactivity timeout or wall-clock deadline has
-    /// been exceeded.
+    /// Returns an error if the observer asked the copy to stop, or if the
+    /// inactivity timeout or wall-clock deadline has been exceeded.
     pub(super) fn enforce_timeout(&mut self) -> Result<(), LocalCopyError> {
+        if self
+            .observer
+            .as_ref()
+            .is_some_and(|observer| observer.should_stop())
+        {
+            return Err(LocalCopyError::interrupted());
+        }
         if let Some(limit) = self.timeout
             && self.last_progress.elapsed() > limit
         {
