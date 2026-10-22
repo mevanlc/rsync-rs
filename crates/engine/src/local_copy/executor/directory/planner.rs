@@ -200,9 +200,9 @@ fn drop_unfollowable_symlink(
         return;
     }
     if error.kind() == io::ErrorKind::NotFound {
-        eprintln!("symlink has no referent: {}", full_fname(path));
+        logging::stderr_line!("symlink has no referent: {}", full_fname(path));
     } else {
-        eprintln!(
+        logging::stderr_line!(
             "rsync: [sender] readlink_stat({}) failed: {}",
             full_fname(path),
             upstream_io_error(error)
@@ -368,7 +368,10 @@ pub(crate) fn plan_directory_entries<'a>(
                                 // upstream: flist.c:1676-1681 - dangling symlink
                                 // whose target was to be dereferenced by
                                 // --copy-unsafe-links; log and skip.
-                                eprintln!("symlink has no referent: {}", entry.path.display());
+                                logging::stderr_line!(
+                                    "symlink has no referent: {}",
+                                    entry.path.display()
+                                );
                                 context.record_io_error();
                                 keep_name = false;
                                 action = EntryAction::SkipNonRegular;
@@ -378,7 +381,7 @@ pub(crate) fn plan_directory_entries<'a>(
                 }
                 Err(_) => {
                     // Cannot read symlink target - skip with I/O error.
-                    eprintln!("symlink has no referent: {}", entry.path.display());
+                    logging::stderr_line!("symlink has no referent: {}", entry.path.display());
                     context.record_io_error();
                     keep_name = false;
                     action = EntryAction::SkipNonRegular;
@@ -801,7 +804,10 @@ fn plan_directory_entries_with_prefetch<'a>(
                             // upstream: flist.c:1676-1681 - dangling symlink
                             // whose target was to be dereferenced by
                             // --copy-unsafe-links; log and skip.
-                            eprintln!("symlink has no referent: {}", entry.path.display());
+                            logging::stderr_line!(
+                                "symlink has no referent: {}",
+                                entry.path.display()
+                            );
                             context.record_io_error();
                             keep_name = false;
                             action = EntryAction::SkipNonRegular;
@@ -810,7 +816,7 @@ fn plan_directory_entries_with_prefetch<'a>(
                 }
                 Err(_) => {
                     // Cannot read symlink target - skip with I/O error.
-                    eprintln!("symlink has no referent: {}", entry.path.display());
+                    logging::stderr_line!("symlink has no referent: {}", entry.path.display());
                     context.record_io_error();
                     keep_name = false;
                     action = EntryAction::SkipNonRegular;

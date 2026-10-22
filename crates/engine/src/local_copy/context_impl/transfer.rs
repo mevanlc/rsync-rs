@@ -812,7 +812,7 @@ impl<'a> CopyContext<'a> {
             return;
         }
         self.record_source_read_error();
-        eprintln!(
+        logging::stderr_line!(
             "rsync: [sender] read errors mapping \"{}\": {}",
             source.display(),
             crate::local_copy::upstream_io_error(&Self::premature_eof_error()),

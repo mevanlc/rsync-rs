@@ -36,9 +36,9 @@ pub(crate) fn report_entry_failure(
     }
     if error.is_vanished_error() {
         // full_fname() wraps the path in double quotes (util1.c:1528).
-        eprintln!("file has vanished: \"{}\"", name.display());
+        logging::stderr_line!("file has vanished: \"{}\"", name.display());
     } else {
-        eprintln!("{}", failure_line(&error, context.destination_root()));
+        logging::stderr_line!("{}", failure_line(&error, context.destination_root()));
     }
     error.into_reported()
 }

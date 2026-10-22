@@ -726,7 +726,7 @@ fn mknod_device_raw(
 /// docs/design/windows-device-file-strategy.md
 #[cfg(not(unix))]
 fn warn_skip_special(destination: &Path, kind_label: &'static str) {
-    eprintln!("{}", format_skip_special_message(destination, kind_label));
+    logging::stderr_line!("{}", format_skip_special_message(destination, kind_label));
 }
 
 /// Builds the WIND-2 skip-with-warn message body so tests can assert the

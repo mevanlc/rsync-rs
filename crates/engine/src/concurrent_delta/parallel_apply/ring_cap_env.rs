@@ -17,7 +17,7 @@
 //! - Read once at startup (process-wide [`OnceLock<Option<usize>>`]) so the
 //!   env-var read never lands on a hot per-file construction path.
 //! - Positive integers (`>= 1`) override the supplied default verbatim.
-//! - Unparseable values emit a one-shot `eprintln!` warning and fall back to
+//! - Unparseable values emit a one-shot `stderr_line!` warning and fall back to
 //!   the supplied default; unparseable input is never silently ignored.
 //! - Unset env var is the common case; [`resolve_ring_capacity`] returns the
 //!   caller-supplied default with no allocation or syscall.
@@ -41,7 +41,7 @@ use std::sync::OnceLock;
 ///
 /// Accepts a positive integer parseable as [`usize`], clamped to
 /// [`MAX_RING_CAP`]. `0` and unparseable values trigger a one-shot
-/// `eprintln!` warning and the applier falls back to the caller-supplied
+/// `stderr_line!` warning and the applier falls back to the caller-supplied
 /// default (typically
 /// [`super::ParallelDeltaApplier::DEFAULT_PER_FILE_REORDER_CAPACITY`]);
 /// values above the ceiling warn and clamp.
@@ -78,7 +78,7 @@ static OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
 /// Returns the cached env-override when set to a positive integer (clamped
 /// to [`MAX_RING_CAP`]); otherwise returns `default`. Initialisation reads
 /// the environment at most once per process; an unparseable, zero-valued, or
-/// over-max env var emits a one-shot `eprintln!` warning on the first call
+/// over-max env var emits a one-shot `stderr_line!` warning on the first call
 /// so operators learn about the typo rather than silently inheriting the
 /// default or an unbounded ring.
 #[must_use]
@@ -99,20 +99,20 @@ fn load_from_env() -> Option<usize> {
     }
     match trimmed.parse::<usize>() {
         Ok(0) => {
-            eprintln!(
+            logging::stderr_line!(
                 "oc-rsync: {RING_CAP_ENV}=0 is invalid (capacity must be positive); falling back to default"
             );
             None
         }
         Ok(n) if n > MAX_RING_CAP => {
-            eprintln!(
+            logging::stderr_line!(
                 "oc-rsync: {RING_CAP_ENV}={n} exceeds the maximum of {MAX_RING_CAP}; clamping to {MAX_RING_CAP}"
             );
             Some(MAX_RING_CAP)
         }
         Ok(n) => Some(n),
         Err(err) => {
-            eprintln!(
+            logging::stderr_line!(
                 "oc-rsync: {RING_CAP_ENV}={raw:?} could not be parsed ({err}); falling back to default"
             );
             None

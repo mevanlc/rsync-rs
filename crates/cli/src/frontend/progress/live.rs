@@ -156,7 +156,6 @@ pub(crate) struct LiveProgress<'a> {
     rendered: bool,
     error: Option<io::Error>,
     active_path: Option<PathBuf>,
-    line_active: bool,
     mode: ProgressMode,
     human_readable: HumanReadableMode,
     /// Sliding-window remaining-time estimator for the overall (`progress2`)
@@ -222,12 +221,12 @@ impl<'a> LiveProgress<'a> {
         human_readable: HumanReadableMode,
         output_config: ProgressOutputConfig,
     ) -> Self {
+        Self::set_line_active(false);
         Self {
             writer,
             rendered: false,
             error: None,
             active_path: None,
-            line_active: false,
             mode,
             human_readable,
             overall_remaining: RemainingTimeEstimator::new(),
@@ -289,11 +288,7 @@ impl<'a> LiveProgress<'a> {
         }
 
         self.write_deferred()?;
-        if self.line_active {
-            writeln!(self.writer)?;
-        }
-
-        Ok(())
+        self.end_active_line()
     }
 
     /// Whether the sender or the local-copy listing names each entry, so a
@@ -305,11 +300,26 @@ impl<'a> LiveProgress<'a> {
                 .is_some_and(|session| session.listing.is_some())
     }
 
+    /// Whether a progress line is left open, unended by a newline.
+    ///
+    /// The state is shared with diagnostics printed straight to stderr, which
+    /// end the open line themselves before their message, so a line they
+    /// ended is not ended a second time here.
+    /// upstream: log.c:455-458 and progress.c:121-123 `output_needs_newline`.
+    fn line_active() -> bool {
+        logging::output_needs_newline()
+    }
+
+    /// Records whether a progress line is left open.
+    fn set_line_active(active: bool) {
+        logging::set_output_needs_newline(active);
+    }
+
     /// Ends an in-flight progress line so the next line starts on its own.
     fn end_active_line(&mut self) -> io::Result<()> {
-        if self.line_active {
+        if Self::line_active() {
             writeln!(self.writer)?;
-            self.line_active = false;
+            Self::set_line_active(false);
         }
         Ok(())
     }
@@ -340,7 +350,7 @@ impl<'a> LiveProgress<'a> {
     fn write_line_restart(&mut self) -> io::Result<()> {
         if self.output_config.is_terminal {
             write!(self.writer, "\r")
-        } else if self.line_active {
+        } else if Self::line_active() {
             writeln!(self.writer)
         } else {
             Ok(())
@@ -546,7 +556,7 @@ impl<'a> ClientProgressObserver for LiveProgress<'a> {
                 };
                 let time_field = format!("{time_text:>10}");
 
-                if self.line_active {
+                if Self::line_active() {
                     if self.output_config.is_terminal {
                         write!(self.writer, "\r")?;
                     } else {
@@ -567,7 +577,7 @@ impl<'a> ClientProgressObserver for LiveProgress<'a> {
                         "{size_field} {percent_field} {rate_field} {time_field} (xfr#{xfr_index}, {chk_prefix}-chk={remaining}/{total})"
                     )?;
                     writeln!(self.writer)?;
-                    self.line_active = false;
+                    Self::set_line_active(false);
                     self.active_path = None;
                     self.per_file_remaining.remove(relative);
                 } else {
@@ -577,7 +587,7 @@ impl<'a> ClientProgressObserver for LiveProgress<'a> {
                         self.writer,
                         "{size_field} {percent_field} {rate_field} {time_field}  "
                     )?;
-                    self.line_active = true;
+                    Self::set_line_active(true);
                     // upstream: progress.c:224 - the throttle baseline advances
                     // to the last rendered in-flight tick; the final tick does
                     // not advance it.
@@ -654,11 +664,11 @@ impl<'a> ClientProgressObserver for LiveProgress<'a> {
                         // is deferred until the summary (main.c:455). We emit
                         // it here to separate from the summary block.
                         writeln!(self.writer)?;
-                        self.line_active = false;
+                        Self::set_line_active(false);
                     } else {
                         // Newline suppressed for progress2 per
                         // progress.c:88 - cursor stays on same line.
-                        self.line_active = true;
+                        Self::set_line_active(true);
                         // upstream: progress.c:133 - rflush(FCLIENT)
                         self.flush_if_needed()?;
                     }
@@ -671,7 +681,7 @@ impl<'a> ClientProgressObserver for LiveProgress<'a> {
                         self.writer,
                         "{size_field} {percent_field} {rate_field} {time_field}  "
                     )?;
-                    self.line_active = true;
+                    Self::set_line_active(true);
                     // upstream: progress.c:224 - the throttle baseline is the
                     // last in-flight tick; final ticks do not advance it.
                     self.last_tick = Some(now);
@@ -1060,6 +1070,77 @@ mod tests {
         }
     }
 
+    /// Renders two in-flight progress2 ticks, optionally with a diagnostic
+    /// printed to stderr between them, and returns what reached `buf`.
+    fn two_overall_ticks(diagnostic_between: bool) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut live = LiveProgress::with_output_config(
+                &mut buf,
+                ProgressMode::Overall,
+                HumanReadableMode::Grouped,
+                piped_config(),
+            );
+            live.tick_interval = Duration::ZERO;
+            live.on_progress(&make_mid_transfer_update(true));
+            assert!(
+                logging::output_needs_newline(),
+                "the tick leaves its line open"
+            );
+            if diagnostic_between {
+                logging::stderr_line!("rsync: [sender] a diagnostic between ticks");
+            }
+            live.on_progress(&make_mid_transfer_update(true));
+            live.finish().expect("finish");
+        }
+        assert!(!logging::output_needs_newline(), "finish ends the line");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    /// upstream: log.c:455-458 - a diagnostic printed while a progress line is
+    /// open ends that line itself (on stderr), so the renderer must not end it
+    /// again: the next tick starts directly on the fresh line, with no blank
+    /// line between them.
+    #[test]
+    fn a_diagnostic_ends_the_open_progress_line_once() {
+        let without = two_overall_ticks(false);
+        assert_eq!(
+            without.matches('\n').count(),
+            2,
+            "piped ticks are newline-separated: {without:?}"
+        );
+        let with = two_overall_ticks(true);
+        assert_eq!(
+            with.matches('\n').count(),
+            1,
+            "the diagnostic already ended the first tick's line: {with:?}"
+        );
+    }
+
+    /// On a terminal, a tick after a diagnostic needs no `\r`: the diagnostic
+    /// left the cursor at the start of a fresh line.
+    #[test]
+    fn per_file_tick_after_a_diagnostic_does_not_rewind() {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut live = LiveProgress::with_output_config(
+                &mut buf,
+                ProgressMode::PerFile,
+                HumanReadableMode::Grouped,
+                terminal_config(),
+            );
+            live.tick_interval = Duration::ZERO;
+            live.on_progress(&make_mid_transfer_update(true));
+            logging::stderr_line!("rsync: [sender] a diagnostic between ticks");
+            live.on_progress(&make_mid_transfer_update(true));
+        }
+        let output = String::from_utf8(buf).expect("utf8");
+        assert!(
+            !output.contains('\r'),
+            "the second tick must not rewind onto the diagnostic: {output:?}"
+        );
+    }
+
     /// When output is not a terminal, progress lines should use `\n` instead
     /// of `\r` so piped output is human-readable.
     #[test]
@@ -1217,7 +1298,7 @@ mod tests {
             );
             // First line: line_active is false, still emits \r.
             live.write_line_restart().unwrap();
-            live.line_active = true;
+            LiveProgress::set_line_active(true);
             live.write_line_restart().unwrap();
         }
         assert_eq!(buf, b"\r\r");
@@ -1237,7 +1318,7 @@ mod tests {
             );
             // First line: line_active is false, emits nothing.
             live.write_line_restart().unwrap();
-            live.line_active = true;
+            LiveProgress::set_line_active(true);
             // Between lines: emits a single newline.
             live.write_line_restart().unwrap();
         }

@@ -559,7 +559,7 @@ impl<A: BufferAllocator> Drop for BufferPool<A> {
     fn drop(&mut self) {
         if std::env::var("OC_RSYNC_BUFFER_POOL_STATS").as_deref() == Ok("1") {
             let stats = self.stats();
-            eprintln!(
+            logging::stderr_line!(
                 "BufferPool stats: reuses={} allocations={} growths={} byte_overflows={} hit_rate={:.1}%",
                 stats.total_hits,
                 stats.total_misses,

@@ -265,7 +265,7 @@ fn copy_directory_recursive_inner(
             if !context.reports_entry_failures() {
                 // A preview pass; the copy that repeats it prints the failure.
             } else if error.is_vanished_error() {
-                eprintln!("directory has vanished: {}", full_fname(source));
+                logging::stderr_line!("directory has vanished: {}", full_fname(source));
             } else {
                 let detail = match error.kind() {
                     crate::local_copy::LocalCopyErrorKind::Io { source, .. } => {
@@ -281,7 +281,7 @@ fn copy_directory_recursive_inner(
                 } else {
                     full_fname(source)
                 };
-                eprintln!("rsync: [sender] opendir {name} failed: {detail}");
+                logging::stderr_line!("rsync: [sender] opendir {name} failed: {detail}");
             }
             context.record_io_error();
             first_entry_io_error = Some(error.into_reported());

@@ -84,7 +84,7 @@ fn warn_once_if(should_warn: bool, already_warned: &AtomicBool, emit: impl FnOnc
 pub(crate) fn warn_ownership_unsupported(options: &MetadataOptions) {
     static WARNED: AtomicBool = AtomicBool::new(false);
     warn_once_if(ownership_requested(options), &WARNED, || {
-        eprintln!("{OWNERSHIP_WARNING}");
+        logging::stderr_line!("{OWNERSHIP_WARNING}");
     });
 }
 
@@ -98,7 +98,7 @@ pub(crate) fn warn_permissions_unsupported(options: &MetadataOptions) {
         permissions_beyond_readonly_requested(options),
         &WARNED,
         || {
-            eprintln!("{PERMISSIONS_WARNING}");
+            logging::stderr_line!("{PERMISSIONS_WARNING}");
         },
     );
 }

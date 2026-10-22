@@ -245,7 +245,7 @@ pub(super) fn keep_preexisting_directory_writable(
     if let Err(error) = fs::set_permissions(destination, fs::Permissions::from_mode(during)) {
         // upstream: generator.c:1907-1910 - rsyserr(FERROR_XFER, ...) and the
         // transfer continues.
-        eprintln!(
+        logging::stderr_line!(
             "rsync: failed to modify permissions on \"{}\": {}",
             destination.display(),
             crate::local_copy::upstream_io_error(&error)

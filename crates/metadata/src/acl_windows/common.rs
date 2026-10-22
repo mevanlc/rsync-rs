@@ -31,7 +31,7 @@ pub(super) const RSYNC_PERM_EXECUTE: u8 = 0x1;
 pub(super) fn warn_partial_apply() {
     static WARN_ONCE: Once = Once::new();
     WARN_ONCE.call_once(|| {
-        eprintln!(
+        logging::stderr_line!(
             "warning: some ACL entries could not be mapped to Windows SIDs and were dropped \
              (cross-platform ACL transmission is best-effort)"
         );
@@ -57,7 +57,7 @@ pub(super) fn warn_dropped_aces(path: &Path, reason: &str, dropped: &[String]) {
     if dropped.is_empty() {
         return;
     }
-    eprintln!(
+    logging::stderr_line!(
         "warning: {}: ACL entries {reason} and were dropped ({} total): {}",
         path.display(),
         dropped.len(),

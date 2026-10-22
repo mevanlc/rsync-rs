@@ -204,7 +204,7 @@ fn warn_source_changed(context: &CopyContext, record_path: &Path, flags: &Transf
     if !logging::info_gte(logging::InfoFlag::Name, 1) && !context.options().is_itemize_active() {
         return;
     }
-    eprintln!(
+    logging::stderr_line!(
         "WARNING: {} failed verification -- update {} (will try again).",
         record_path.display(),
         kept_description(context, flags),
@@ -218,7 +218,7 @@ fn warn_source_changed(context: &CopyContext, record_path: &Path, flags: &Transf
 /// `errstr = "ERROR"` with an empty `redostr`. `FERROR_XFER` short-circuits the
 /// name gate at receiver.c:1351, so the line is unconditional.
 fn note_redo_discarded(context: &CopyContext, record_path: &Path, flags: &TransferFlags) {
-    eprintln!(
+    logging::stderr_line!(
         "ERROR: {} failed verification -- update {}.",
         record_path.display(),
         kept_description(context, flags),
@@ -273,7 +273,7 @@ fn warn_verification_failed(context: &CopyContext, record_path: &Path) {
     if !logging::info_gte(logging::InfoFlag::Name, 1) && !context.options().is_itemize_active() {
         return;
     }
-    eprintln!(
+    logging::stderr_line!(
         "WARNING: {} failed verification -- update retained (will try again).",
         record_path.display()
     );

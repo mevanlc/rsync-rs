@@ -249,20 +249,20 @@ fn parse_block_size_override(env_val: Option<String>) -> Option<usize> {
     let bytes = match parse_size_arg(trimmed, b'b') {
         Ok(parsed) => usize::try_from(parsed.bytes).ok()?,
         Err(_) => {
-            eprintln!(
+            logging::stderr_line!(
                 "oc-rsync: {ENV_BUFFER_POOL_BLOCK_SIZE}={raw:?} could not be parsed as a size; falling back to default"
             );
             return None;
         }
     };
     if bytes == 0 {
-        eprintln!(
+        logging::stderr_line!(
             "oc-rsync: {ENV_BUFFER_POOL_BLOCK_SIZE}={raw:?} is invalid (block size must be positive); falling back to default"
         );
         return None;
     }
     if bytes > MAX_BUFFER_POOL_BLOCK_SIZE {
-        eprintln!(
+        logging::stderr_line!(
             "oc-rsync: {ENV_BUFFER_POOL_BLOCK_SIZE}={raw:?} exceeds the {MAX_BUFFER_POOL_BLOCK_SIZE}-byte maximum; clamping"
         );
         return Some(MAX_BUFFER_POOL_BLOCK_SIZE);

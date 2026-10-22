@@ -194,7 +194,7 @@ fn impossible_id_message(kind: &str, destination: &Path) -> String {
 /// `xattr_stub::warn_xattr_unsupported`) which print the message verbatim.
 #[cfg(unix)]
 fn warn_impossible_id(kind: &str, destination: &Path) {
-    eprintln!("{}", impossible_id_message(kind, destination));
+    logging::stderr_line!("{}", impossible_id_message(kind, destination));
 }
 
 /// Returns `true` when a resolved id of `(uid_t)-1` cannot be applied because
@@ -316,7 +316,7 @@ fn warn_getgroups_failed(err: &io::Error) {
 fn report_getgroups_failed(err: &io::Error) {
     let message = getgroups_failed_message(err);
     logging::debug_log!(Seccomp, 1, "{message}");
-    eprintln!("{message}");
+    logging::stderr_line!("{message}");
 }
 
 #[cfg(unix)]

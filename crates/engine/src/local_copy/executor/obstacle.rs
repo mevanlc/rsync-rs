@@ -163,7 +163,7 @@ pub(crate) fn clear_directory_obstacle(
                 // "delete_file: %s(%s) failed", what, fbuf). The obstacle is cleared by
                 // the generator (atomic_create -> delete_item), so who_am_i() is
                 // `generator`.
-                eprintln!(
+                logging::stderr_line!(
                     "rsync: [generator] delete_file: rmdir({}) failed: {}",
                     display_name(destination, relative),
                     crate::local_copy::upstream_io_error(&error),
@@ -275,7 +275,7 @@ fn report_make_way_failure(
     relative: Option<&Path>,
     make_way_for: MakeWayFor,
 ) {
-    eprintln!(
+    logging::stderr_line!(
         "could not make way for new {}: {}",
         make_way_for.description(),
         display_name(destination, relative),
@@ -388,7 +388,7 @@ pub(crate) fn clear_device_obstacle(
         Err(error) => {
             // upstream: delete.c:264-266 - rsyserr(FERROR_XFER, errno,
             // "delete_file: %s(%s) failed", what, fbuf).
-            eprintln!(
+            logging::stderr_line!(
                 "rsync: [generator] delete_file: unlink({}) failed: {}",
                 display_name(destination, relative),
                 crate::local_copy::upstream_io_error(&error),

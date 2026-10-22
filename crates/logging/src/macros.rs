@@ -136,3 +136,16 @@ macro_rules! debug_log {
         }
     };
 }
+
+/// Prints a diagnostic line to stderr like `eprintln!`, first ending a
+/// progress line left open on the terminal so the message starts on its own
+/// line.
+///
+/// upstream: log.c:455-458 - `rwrite()` writes a newline before a message
+/// while `output_needs_newline` is set.
+#[macro_export]
+macro_rules! stderr_line {
+    ($($arg:tt)*) => {
+        $crate::write_stderr_line(format_args!($($arg)*))
+    };
+}

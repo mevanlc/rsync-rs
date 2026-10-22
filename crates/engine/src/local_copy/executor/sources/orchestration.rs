@@ -733,7 +733,7 @@ pub(crate) fn copy_sources(
                 // to the path-following open the walk exists to replace.
                 if let Err(error) = context.set_files_from_base(source) {
                     if context.reports_entry_failures() {
-                        eprintln!("{error}");
+                        logging::stderr_line!("{error}");
                     }
                     context.record_io_error();
                     retain_entry_failure(&mut first_io_error, error);
@@ -755,7 +755,7 @@ pub(crate) fn copy_sources(
                         // sets IOERR_GENERAL (exit 23), and the transfer
                         // continues with the remaining sources.
                         if context.reports_entry_failures() {
-                            eprintln!("{error}");
+                            logging::stderr_line!("{error}");
                         }
                         context.record_io_error();
                         retain_entry_failure(&mut first_io_error, error);

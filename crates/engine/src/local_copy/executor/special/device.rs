@@ -455,7 +455,7 @@ pub(crate) fn copy_device(
     #[cfg(not(unix))]
     {
         let _ = (metadata_options, destination_previously_existed);
-        eprintln!("{}", format_skip_device_message(destination));
+        logging::stderr_line!("{}", format_skip_device_message(destination));
         if let Some(path) = &record_path {
             let metadata_snapshot = LocalCopyMetadata::from_metadata(metadata, None);
             let total_bytes = Some(metadata_snapshot.len());

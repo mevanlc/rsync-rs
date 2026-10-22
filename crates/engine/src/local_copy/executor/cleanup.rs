@@ -1119,7 +1119,7 @@ pub(crate) fn remove_source_entry_if_requested(
         // upstream: sender.c:430-431,179-180 - any other re-lstat failure is an
         // FERROR_XFER: leave the source in place and finish RERR_PARTIAL (23).
         Err(error) => {
-            eprintln!(
+            logging::stderr_line!(
                 "rsync: [sender] sender failed to re-lstat \"{}\": {}",
                 source.display(),
                 crate::local_copy::upstream_io_error(&error),
@@ -1143,7 +1143,7 @@ pub(crate) fn remove_source_entry_if_requested(
         if let Ok(destination_meta) = fs::symlink_metadata(destination)
             && is_destination_inode(&current, &destination_meta)
         {
-            eprintln!(
+            logging::stderr_line!(
                 "ERROR: Skipping sender remove of destination file: {}",
                 source.display()
             );
@@ -1157,7 +1157,7 @@ pub(crate) fn remove_source_entry_if_requested(
     // upstream: sender.c:443-452 - refuse to remove a source that changed size
     // or modification time since it was copied.
     if source_identity_changed(recorded, &current) {
-        eprintln!(
+        logging::stderr_line!(
             "ERROR: Skipping sender remove for changed file: {}",
             source.display()
         );
@@ -1188,7 +1188,7 @@ pub(crate) fn remove_source_entry_if_requested(
         // upstream: sender.c:455,179-180 - a failed unlink is an FERROR_XFER:
         // record the soft error so the run finishes RERR_PARTIAL (23).
         Err(error) => {
-            eprintln!(
+            logging::stderr_line!(
                 "rsync: [sender] sender failed to remove \"{}\": {}",
                 source.display(),
                 crate::local_copy::upstream_io_error(&error),

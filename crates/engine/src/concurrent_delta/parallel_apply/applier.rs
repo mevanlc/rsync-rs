@@ -264,7 +264,7 @@ impl ParallelDeltaApplier {
     /// have an actionable next step.
     ///
     /// The warning goes through `tracing::warn!` (visible at `--info=ALL`
-    /// minimum) and is mirrored to stderr via [`eprintln!`] so default
+    /// minimum) and is mirrored to stderr via [`logging::stderr_line!`] so default
     /// builds without the `tracing` feature still surface it.
     ///
     pub(crate) fn note_reorder_saturation(&self, ndx: FileNdx, chunk_sequence: u64) {
@@ -276,7 +276,7 @@ impl ParallelDeltaApplier {
         {
             let capacity = self.per_file_reorder_capacity;
             let file_count = self.files.len();
-            eprintln!(
+            logging::stderr_line!(
                 "warning: per-file reorder ring saturated during transfer \
                  (ndx={ndx}, chunk_sequence={chunk_sequence}, ring_capacity={capacity}, \
                  registered_files={file_count}); this indicates either an adversarial \

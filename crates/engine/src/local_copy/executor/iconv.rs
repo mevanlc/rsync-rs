@@ -148,7 +148,7 @@ pub(crate) fn name_is_convertible(name: &OsStr, converter: Option<&FilenameConve
 /// - `flist.c:2020` `send_file_name()` - `rprintf(FERROR_XFER, "[%s] cannot convert
 ///   filename: %s (%s)\n", who_am_i(), f_name(file, fbuf), strerror(errno))`.
 pub(crate) fn emit_cannot_convert_filename(display: &OsStr) {
-    eprintln!(
+    logging::stderr_line!(
         "{}",
         protocol::iconv::cannot_convert_filename_message("sender", os_str_to_bytes(display))
     );

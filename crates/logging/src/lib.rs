@@ -85,6 +85,7 @@ mod levels;
 mod log_code;
 mod macros;
 mod phase_timer;
+mod progress_line;
 mod sequence;
 mod stream;
 mod thread_local;
@@ -104,6 +105,7 @@ pub use error_format::{
 pub use levels::{DebugFlag, DebugLevels, InfoFlag, InfoLevels};
 pub use log_code::{LogCode, ParseLogCodeError};
 pub use phase_timer::PhaseTimer;
+pub use progress_line::{output_needs_newline, set_output_needs_newline, write_stderr_line};
 pub use sequence::{Sequence, Stamped};
 pub use stream::{BadLogCode, MessageStream, Msgs2Stderr, StreamContext, message_stream};
 pub use thread_local::{

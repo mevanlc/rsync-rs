@@ -17,7 +17,9 @@ use std::sync::Once;
 fn warn_acl_unsupported() {
     static WARN_ONCE: Once = Once::new();
     WARN_ONCE.call_once(|| {
-        eprintln!("warning: ACLs are not supported on this platform; skipping ACL preservation");
+        logging::stderr_line!(
+            "warning: ACLs are not supported on this platform; skipping ACL preservation"
+        );
     });
 }
 
